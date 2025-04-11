@@ -30,7 +30,7 @@ class RMSNorm(nn.Module):
         # 计算 RMSNorm 的前向传播
         return self.weight * self._norm(x).type_as(x)  # 保持数据类型一致
 
-    def test_normalization(self):
+    def _test_normalization(self):
         import matplotlib.pyplot as plt
 
         # 设置随机种子以确保结果可复现
@@ -400,8 +400,91 @@ class MiniLLM(PreTrainedModel):
         self.OUT.__setitem__("past_key_values",past_kvs) # 设置past_key_values
         return self.OUT
     
+    def generate(self,input_ids:torch.Tensor,eos_token_id:int,
+                 max_new_tokens:int=1024,temperature:float=0.75,
+                 top_p:float=0.90,stream:bool=False,
+                 repetition_penalty:float=1.0,use_cache:bool=True,pad_token_id:int=0,
+                 num_return_sequences:int=1,**kwargs)->torch.Tensor:
+        """
+
+        Args:
+            input_ids: 输入的ids
+            eos_token_id: 结束符
+            max_new_tokens: 最大新词数
+            temperature: 温度
+            top_p: 
+            stream: 是否流式生成
+            repetition_penalty: 重复惩罚
+            use_cache: 是否使用缓存
+            pad_token_id: 填充符
+            num_return_sequences: 返回序列数
+            **kwargs:
+
+        Returns:
+
+        """
+        if stream:
+            pass
 
 
+    def _stream_generate(self,input_ids:torch.Tensor,eos_token_id:int,
+                         max_new_tokens:int=1024,temperature:float=0.75,
+                         top_p:float=0.90,
+                         repetition_penalty:float=1.0,use_cache:bool=True,**kwargs)->torch.Tensor:
+        """
+
+        Args:
+            eos_token_id: 结束符
+            max_new_tokens: 最大新词数
+            temperature: 温度
+            top_p: 
+            repetition_penalty: 
+            use_cache: 是否使用缓存
+            **kwargs:
+
+        Returns:
+
+        """
+                         
+        start,first_seq,past_kvs = input_ids.shape[1],True,None # 初始化开始位置、是否是第一个序列、是否使用缓存
+        while input_ids.shape[1] < max_new_tokens -1: # 当序列长度小于最大新词数时
+            if first_seq or not use_cache: # 如果是第一个序列或者不使用缓存
+                out = self.forward(input_ids, past_key_values=past_kvs,use_cache=use_cache,**kwargs) # 计算输出
+                first_seq = False # 设置为False
+            else:
+                # 如果不是第一个序列，则使用缓存,输入的input_ids是最后一个token，start_pos是最后一个token的位置（因为前面的序列已经计算过了）
+                out = self.forward(input_ids[:,-1], pask_key_values=past_kvs,
+                                   use_cache=use_cache,start_pos=input_ids.shape[1]- 1,**kwargs) 
+                
+            logits,past_kvs = out.logits[:,-1,:],out.past_key_values # 获取最后一个token的logits和past_kvs
+            # 对当前已生成的 token（即在 input_ids 中出现过的 token）对应的 logits 值进行“惩罚”，除以一个 repetition_penalty 值。
+            # 这样做可以降低重复 token 的生成概率，从而减少重复。
+            logits[:,list(set(input_ids.tolist()))] /= repetition_penalty 
+            # 使用 temperature 参数来控制生成结果的多样性。
+            logits /= (temperature + 1e-9)
+            if top_p is not None and top_p < 1.0:
+                # 对 logits 进行排序，并计算累积概率
+                sorted_logits,sorted_indices = torch.sort(logits,descending=True,dim=-1)
+                
+                sorted_probs = F.softmax(sorted_logits,dim=-1)
+                # torch.cumsum()函数用于对输入张量进行累加和操作，返回一个新的张量，其中每个元素都是原张量中对应位置及之前所有元素的累加和。
+                cumulative_probs = torch.cumsum(sorted_probs,dim=-1)
+                # 如果累积概率大于 top_p，则将该位置的索引标记为需要移除的索引。
+                sorted_indices_to_remove = cumulative_probs > top_p 
+                # 将需要移除的索引向右移动一位，确保索引 0 不会被移除。
+                sorted_indices_to_remove[:,1:] = sorted_indices_to_remove[:,:-1].clone()
+                sorted_indices_to_remove[:,0] = False # 确保索引 0 不会被移除
+                # TODO 理解scatter函数
+                indices_to_remove = sorted_indices_to_remove.scatter(1,sorted_indices,sorted_indices_to_remove)
+                # 将需要移除的索引设置为 -inf，这样在后续的 softmax 操作中，这些位置的概率将变为 0。
+                sorted_logits[sorted_indices_to_remove] = -float('inf')
+            # 使用 torch.multinomial 函数从概率分布中随机采样一个 token。
+            input_ids_next = torch.multinomial(F.softmax(sorted_logits,dim=-1),num_samples=1)
+            input_ids = torch.cat([input_ids,input_ids_next],dim=1)
+            yield input_ids[:,start:] # 返回当前生成的序列
+            if input_ids_next == eos_token_id: # 如果生成的token是结束符，则停止生成
+                break
+            
 
 if __name__ == "__main__":
     rms_norm = RMSNorm(dim=10, eps=1e-5)

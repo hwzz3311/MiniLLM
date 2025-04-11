@@ -105,8 +105,8 @@ def train_one_epoch(model,train_loader,optimizer,scaler,epoch,wandb):
         if (step + 1) % args.save_interval == 0 and (not ddp or dist.get_rank() ==0) or step == iter_per_epoch - 1:
             model.eval()
             moe_path = "_moe" if lm_config.use_moe else ""
-            ckp = f"{args.save_dir}/epoch_{epoch}_step_{step}_{args.dim}{moe_path}.pth"
-
+            ckp = f"{args.save_dir}/dim_{args.dim}/n_layers_{args.n_layers}/epoch_{epoch}_step_{step}{moe_path}.pth"
+            os.makedirs(os.path.dirname(ckp),exist_ok=True)
             if isinstance(model, torch.nn.parallel.DistributedDataParallel):
                 state_dict = model.module.state_dict()
             else:
