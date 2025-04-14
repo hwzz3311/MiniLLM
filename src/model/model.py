@@ -285,7 +285,7 @@ class Attention(nn.Module):
                 is_causal=True  # 是否考虑掩码，当 is_causal=True 时，函数会自动生成一个上三角掩码
             )  # shape: [B, n_heads, L, D]
         else:
-            socres = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)  # 计算注意力权重 # shape: [B, n_heads, L, L]
+            scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)  # 计算注意力权重 # shape: [B, n_heads, L, L]
             scores += self.mask[:, :, :seq_len, :seq_len]  # 设置掩码 # scores.shape: [1, 1, L, L]
             scores = F.softmax(scores.float(), dim=-1).type_as(xq)  # 计算softmax # scores.shape: [B, n_heads, L, L]
             scores = self.attn_dropout(scores)  # 设置注意力dropout
@@ -408,7 +408,7 @@ class MiniLLM(PreTrainedModel):
         """
 
         Args:
-            input_ids: 输入的ids
+            input_ids: 输入的 token ID 张量，形状为 [batch_size, seq_len]。
             eos_token_id: 结束符
             max_new_tokens: 最大新词数
             temperature: 温度
@@ -424,8 +424,46 @@ class MiniLLM(PreTrainedModel):
 
         """
         if stream:
-            pass
+            return self._stream_generate(input_ids,eos_token_id,max_new_tokens,temperature,top_p,repetition_penalty,use_cache,**kwargs)
+        # 直接生成
+        generated = []
+        for i in range(input_ids.size(0)): # 遍历 batch_size，即每个输入样本。
+            # 获取非填充符, 因为input_ids中可能包含填充符
+            non_pad = input_ids[i][input_ids[i] != pad_token_id].unsqueeze(0) # 取出每一个输入，从 [seq_len'] 变为 [1, seq_len']，用于后续模型调用。
+            for _ in range(num_return_sequences): # 需要生成的条数
+                out = self._stream_generate(non_pad,eos_token_id,max_new_tokens,temperature,top_p,repetition_penalty,use_cache,**kwargs)
+                # out 是 迭代器，每次生成一个词，循环迭代，获取每次生成的最后一个token
+                token_list = [tokens[:,-1:] for tokens in out]
+                # 拼接token，如果token_list为空，则使用non_pad
+                if token_list:
+                    gen = torch.cat(token_list,dim=-1) 
+                    full_sequence = torch.cat([non_pad,gen],dim=1) 
+                else:
+                    Warning("No tokens generated")
+                    full_sequence = non_pad
+                generated.append(full_sequence)
 
+        max_len = max(seq.shape[1] for seq in generated) # 获取所有生成结果最大长度, 用于后续填充
+
+        generated = [
+            torch.cat(
+                [
+                    seq,
+                    torch.full((1,max_len - seq.shape[1]),pad_token_id,dtype=seq.dtype,device=seq.device)
+                ],
+                dim=1
+            ) for seq in generated
+        ] # 每个 seq 被填充到 [1, max_length]，用于后续拼接
+        output = torch.cat(generated,dim=0) # 拼接所有生成结果
+        res = output.view(input_ids.size(0) * num_return_sequences, -1) # 展平
+        """
+        提问：这里进行了padding，会增加很多padding符号，会不会影响最终的结果
+        答：不会影响最终的结果，因为padding符号不会参与后续的计算，不会影响模型的推理过程。
+        并且 生成的是 token_ids，而不是 token，还需要进行tokenizer.decode() 才能得到最终的结果。
+        在tokenizer.decode() 时，可以使用 skip_special_tokens=True 来忽略这些padding符号。
+        """
+        return res
+        
 
     def _stream_generate(self,input_ids:torch.Tensor,eos_token_id:int,
                          max_new_tokens:int=1024,temperature:float=0.75,
@@ -453,13 +491,13 @@ class MiniLLM(PreTrainedModel):
                 first_seq = False # 设置为False
             else:
                 # 如果不是第一个序列，则使用缓存,输入的input_ids是最后一个token，start_pos是最后一个token的位置（因为前面的序列已经计算过了）
-                out = self.forward(input_ids[:,-1], pask_key_values=past_kvs,
+                out = self.forward(input_ids[:,-1:], pask_key_values=past_kvs,
                                    use_cache=use_cache,start_pos=input_ids.shape[1]- 1,**kwargs) 
                 
             logits,past_kvs = out.logits[:,-1,:],out.past_key_values # 获取最后一个token的logits和past_kvs
             # 对当前已生成的 token（即在 input_ids 中出现过的 token）对应的 logits 值进行“惩罚”，除以一个 repetition_penalty 值。
             # 这样做可以降低重复 token 的生成概率，从而减少重复。
-            logits[:,list(set(input_ids.tolist()))] /= repetition_penalty 
+            logits[:,list(set(input_ids.tolist()[0]))] /= repetition_penalty 
             # 使用 temperature 参数来控制生成结果的多样性。
             logits /= (temperature + 1e-9)
             if top_p is not None and top_p < 1.0:
@@ -477,7 +515,7 @@ class MiniLLM(PreTrainedModel):
                 # TODO 理解scatter函数
                 indices_to_remove = sorted_indices_to_remove.scatter(1,sorted_indices,sorted_indices_to_remove)
                 # 将需要移除的索引设置为 -inf，这样在后续的 softmax 操作中，这些位置的概率将变为 0。
-                sorted_logits[sorted_indices_to_remove] = -float('inf')
+                sorted_logits[indices_to_remove] = -float('inf')
             # 使用 torch.multinomial 函数从概率分布中随机采样一个 token。
             input_ids_next = torch.multinomial(F.softmax(sorted_logits,dim=-1),num_samples=1)
             input_ids = torch.cat([input_ids,input_ids_next],dim=1)
