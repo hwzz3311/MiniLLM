@@ -120,13 +120,22 @@ if __name__ == "__main__":
     this_dir = os.path.dirname(os.path.abspath(__file__))
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     dtype = torch.bfloat16 if device == "cuda" else torch.float32 # cuda 使用 bfloat16 精度，mps 使用 float32 精度
-    tokenizer_path = os.path.join(this_dir,"tokenizer_output")
-    default_data_path = os.path.join(this_dir,"data_sample/wikipedia_zh_sample_data.json")
+    tokenizer_path = os.path.join(this_dir,"./assets/tokenizer_output")
+    default_data_path = os.path.join(this_dir,"data_sample/baidubaike_wikipedia_sample_data.parquet")
+
+    model_dir = os.path.join(this_dir,"./output/dim_512/n_layers_8")
+    # 获取模型目录下所有文件,安装创建时间进行倒序，
+    model_files = os.listdir(model_dir)
+    model_files.sort(key=lambda x: os.path.getctime(os.path.join(model_dir, x)), reverse=True)
+    model_check_point_path = os.path.join(model_dir, model_files[0])
+    print(f"使用模型: {model_check_point_path}")
+
     parser = argparse.ArgumentParser(description="Train  pretrain model")
     parser.add_argument("--out_dir",type=str,default="output",help="The output directory")
-    parser.add_argument("--epochs",type=int,default=1)
+    parser.add_argument("--epochs",type=int,default=100)
     parser.add_argument("--batch_size",type=int,default=1)
     parser.add_argument("--learning_rate",type=float,default=5e-4)
+    parser.add_argument("--checkpoint_path",default=model_check_point_path)
     parser.add_argument("--device",type=str,default=device)
     parser.add_argument("--dtype",type=str,default=dtype)
     parser.add_argument("--use_wandb",action="store_true",default=True)
@@ -138,10 +147,10 @@ if __name__ == "__main__":
     parser.add_argument("--grad_clip",type=float,default=1.0) # 梯度裁剪
     parser.add_argument("--warmup_iters",type=int,default=100) # 预热步数
     parser.add_argument("--log_interval",type=int,default=10) # 日志间隔
-    parser.add_argument("--save_interval",type=int,default=100) # 保存间隔
+    parser.add_argument("--save_interval",type=int,default=1000) # 保存间隔
     parser.add_argument("--dim",type=int,default=512) # 隐层维度
     parser.add_argument("--n_layers",type=int,default=8) # 层数
-    parser.add_argument("--max_seq_len",type=int,default=512) # 最大序列长度
+    parser.add_argument("--max_seq_len",type=int,default=1024) # 最大序列长度
     parser.add_argument("--use_moe",default=False,type=bool) # 是否使用 MoE
     parser.add_argument("--data_path",type=str,default=default_data_path) # 数据路径
     args = parser.parse_args()
@@ -161,7 +170,7 @@ if __name__ == "__main__":
     torch.manual_seed(2025) # 设置随机种子
     device_type = args.device
 
-    args.wandb_run_name = f"MiniLLM_{args.max_seq_len}B_{args.batch_size}B_{args.epochs}epochs_{args.dim}dim_{args.use_moe}moe_{args.n_layers}layers"
+    args.wandb_run_name = f"MiniLLM_{args.max_seq_len}seq_{args.batch_size}B_{args.epochs}epochs_{args.dim}dim_{args.use_moe}moe_{args.n_layers}layers"
 
     ctx = nullcontext() if device_type == "cpu" else torch.cuda.amp.autocast() # 上下文管理器
 
@@ -177,6 +186,9 @@ if __name__ == "__main__":
         wandb = None
     Log("loading model")
     model,tokenizer = init_model(lm_config,tokenizer_path)
+    if args.checkpoint_path:
+        model.load_state_dict(torch.load(args.checkpoint_path))
+        Log(f"load check_point {args.checkpoint_path} success!")
     model.to(args.device)
     Log("loading data")
     train_ds = PretrainDataset(args.data_path,

@@ -2,7 +2,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
 import torch.nn as nn
 import torch
-from typing import Optional, Tuple,List
+from typing import Optional, Tuple, List
 import torch.nn.functional as F
 import math
 from src.model.config import MiniLLMConfig
@@ -17,12 +17,12 @@ class RMSNorm(nn.Module):
     计算效率更高：比传统 LayerNorm 少了约 20% 的计算量
     """
 
-    def __init__(self, dim: int, eps: float=1e-6):
+    def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps  # 设置eps 防止除零的小常数
         self.dim = dim  # 设置维度
         self.weight = nn.Parameter(torch.ones(dim))  # 初始化权重参数，可学习的缩放参数，初始化为全1向量
-    
+
     def _norm(self, x: torch.Tensor):
         return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
 
@@ -304,7 +304,8 @@ class FeedForward(nn.Module):
         if config.intermediate_size is None:
             hidden_dim = 4 * config.hidden_size  # 计算隐藏维度
             hidden_dim = int(2 * hidden_dim / 3)  # 计算隐藏维度
-            config.intermediate_size = config.multiple_of * ((hidden_dim + config.multiple_of - 1) // config.multiple_of)
+            config.intermediate_size = config.multiple_of * (
+                        (hidden_dim + config.multiple_of - 1) // config.multiple_of)
 
         self.w1 = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)  # 设置第一个线性层
         self.w2 = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)  # 设置第二个线性层
@@ -370,41 +371,42 @@ class MiniLLM(PreTrainedModel):
 
         self.register_buffer("pos_cis",
                              precompute_pos_cis(dim=config.hidden_size // config.n_heads, theta=config.rope_theta),
-                             persistent=False) # 注册位置编码，persistent=False表示不保存位置编码
+                             persistent=False)  # 注册位置编码，persistent=False表示不保存位置编码
 
-        self.OUT = CausalLMOutputWithPast() # 创建输出对象
-    
+        self.OUT = CausalLMOutputWithPast()  # 创建输出对象
+
     def forward(self,
-            input_ids:Optional[torch.Tensor]=None,
-            pask_key_values:Optional[List[Tuple[torch.Tensor,torch.Tensor]]]=None,
-            use_cache:bool=False,
-            **args)->CausalLMOutputWithPast:
-        past_key_values = pask_key_values or [None] * self.n_layers # 初始化past_key_values
-        start_pos = args.get("start_pos",0) # 获取开始位置
-        h = self.dropout(self.tok_embeddings(input_ids)) # 计算词嵌入并应用dropout
-        pos_cis = self.pos_cis[start_pos:start_pos + input_ids.shape[1]] # 获取位置编码
-        past_kvs = [] # 初始化过去的键值对列表
-        for l,layer in enumerate(self.layers):
-            h,past_kv = layer(
-                h, # 输入
-                pos_cis, # 位置编码
-                past_key_value=past_key_values[l], # 过去键值
-                use_cache = use_cache # 是否使用缓存
+                input_ids: Optional[torch.Tensor] = None,
+                pask_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+                use_cache: bool = False,
+                **args) -> CausalLMOutputWithPast:
+        past_key_values = pask_key_values or [None] * self.n_layers  # 初始化past_key_values
+        start_pos = args.get("start_pos", 0)  # 获取开始位置
+        h = self.dropout(self.tok_embeddings(input_ids))  # 计算词嵌入并应用dropout
+        pos_cis = self.pos_cis[start_pos:start_pos + input_ids.shape[1]]  # 获取位置编码
+        past_kvs = []  # 初始化过去的键值对列表
+        for l, layer in enumerate(self.layers):
+            h, past_kv = layer(
+                h,  # 输入
+                pos_cis,  # 位置编码
+                past_key_value=past_key_values[l],  # 过去键值
+                use_cache=use_cache  # 是否使用缓存
             )
-            past_kvs.append(past_kv) # 保存当前层的键值对
-        h = self.norm(h) # 归一化
-        logits = self.output(h) # 计算输出
-        aux_loss = sum(l.feed_forward.aux_loss for l in self.layers if isinstance(l.feed_forward, MOEFeedForward)) # 计算辅助损失
-        self.OUT.__setitem__("logits",logits) # 设置logits
-        self.OUT.__setitem__("aux_loss",aux_loss) # 设置辅助损失
-        self.OUT.__setitem__("past_key_values",past_kvs) # 设置past_key_values
+            past_kvs.append(past_kv)  # 保存当前层的键值对
+        h = self.norm(h)  # 归一化
+        logits = self.output(h)  # 计算输出
+        aux_loss = sum(
+            l.feed_forward.aux_loss for l in self.layers if isinstance(l.feed_forward, MOEFeedForward))  # 计算辅助损失
+        self.OUT.__setitem__("logits", logits)  # 设置logits
+        self.OUT.__setitem__("aux_loss", aux_loss)  # 设置辅助损失
+        self.OUT.__setitem__("past_key_values", past_kvs)  # 设置past_key_values
         return self.OUT
-    
-    def generate(self,input_ids:torch.Tensor,eos_token_id:int,
-                 max_new_tokens:int=1024,temperature:float=0.75,
-                 top_p:float=0.90,stream:bool=False,
-                 repetition_penalty:float=1.0,use_cache:bool=True,pad_token_id:int=0,
-                 num_return_sequences:int=1,**kwargs)->torch.Tensor:
+
+    def generate(self, input_ids: torch.Tensor, eos_token_id: int,
+                 max_new_tokens: int = 1024, temperature: float = 0.75,
+                 top_p: float = 0.90, stream: bool = False,
+                 repetition_penalty: float = 1.0, use_cache: bool = True, pad_token_id: int = 0,
+                 num_return_sequences: int = 1, **kwargs) -> torch.Tensor:
         """
 
         Args:
@@ -412,7 +414,7 @@ class MiniLLM(PreTrainedModel):
             eos_token_id: 结束符
             max_new_tokens: 最大新词数
             temperature: 温度
-            top_p: 
+            top_p:
             stream: 是否流式生成
             repetition_penalty: 重复惩罚
             use_cache: 是否使用缓存
@@ -424,38 +426,41 @@ class MiniLLM(PreTrainedModel):
 
         """
         if stream:
-            return self._stream_generate(input_ids,eos_token_id,max_new_tokens,temperature,top_p,repetition_penalty,use_cache,**kwargs)
+            return self._stream_generate(input_ids, eos_token_id, max_new_tokens, temperature, top_p,
+                                         repetition_penalty, use_cache, **kwargs)
         # 直接生成
         generated = []
-        for i in range(input_ids.size(0)): # 遍历 batch_size，即每个输入样本。
+        for i in range(input_ids.size(0)):  # 遍历 batch_size，即每个输入样本。
             # 获取非填充符, 因为input_ids中可能包含填充符
-            non_pad = input_ids[i][input_ids[i] != pad_token_id].unsqueeze(0) # 取出每一个输入，从 [seq_len'] 变为 [1, seq_len']，用于后续模型调用。
-            for _ in range(num_return_sequences): # 需要生成的条数
-                out = self._stream_generate(non_pad,eos_token_id,max_new_tokens,temperature,top_p,repetition_penalty,use_cache,**kwargs)
+            non_pad = input_ids[i][input_ids[i] != pad_token_id].unsqueeze(
+                0)  # 取出每一个输入，从 [seq_len'] 变为 [1, seq_len']，用于后续模型调用。
+            for _ in range(num_return_sequences):  # 需要生成的条数
+                out = self._stream_generate(non_pad, eos_token_id, max_new_tokens, temperature, top_p,
+                                            repetition_penalty, use_cache, **kwargs)
                 # out 是 迭代器，每次生成一个词，循环迭代，获取每次生成的最后一个token
-                token_list = [tokens[:,-1:] for tokens in out]
+                token_list = [tokens[:, -1:] for tokens in out]
                 # 拼接token，如果token_list为空，则使用non_pad
                 if token_list:
-                    gen = torch.cat(token_list,dim=-1) 
-                    full_sequence = torch.cat([non_pad,gen],dim=1) 
+                    gen = torch.cat(token_list, dim=-1)
+                    full_sequence = torch.cat([non_pad, gen], dim=1)
                 else:
                     Warning("No tokens generated")
                     full_sequence = non_pad
                 generated.append(full_sequence)
 
-        max_len = max(seq.shape[1] for seq in generated) # 获取所有生成结果最大长度, 用于后续填充
+        max_len = max(seq.shape[1] for seq in generated)  # 获取所有生成结果最大长度, 用于后续填充
 
         generated = [
             torch.cat(
                 [
                     seq,
-                    torch.full((1,max_len - seq.shape[1]),pad_token_id,dtype=seq.dtype,device=seq.device)
+                    torch.full((1, max_len - seq.shape[1]), pad_token_id, dtype=seq.dtype, device=seq.device)
                 ],
                 dim=1
             ) for seq in generated
-        ] # 每个 seq 被填充到 [1, max_length]，用于后续拼接
-        output = torch.cat(generated,dim=0) # 拼接所有生成结果
-        res = output.view(input_ids.size(0) * num_return_sequences, -1) # 展平
+        ]  # 每个 seq 被填充到 [1, max_length]，用于后续拼接
+        output = torch.cat(generated, dim=0)  # 拼接所有生成结果
+        res = output.view(input_ids.size(0) * num_return_sequences, -1)  # 展平
         """
         提问：这里进行了padding，会增加很多padding符号，会不会影响最终的结果
         答：不会影响最终的结果，因为padding符号不会参与后续的计算，不会影响模型的推理过程。
@@ -463,66 +468,64 @@ class MiniLLM(PreTrainedModel):
         在tokenizer.decode() 时，可以使用 skip_special_tokens=True 来忽略这些padding符号。
         """
         return res
-        
 
-    def _stream_generate(self,input_ids:torch.Tensor,eos_token_id:int,
-                         max_new_tokens:int=1024,temperature:float=0.75,
-                         top_p:float=0.90,
-                         repetition_penalty:float=1.0,use_cache:bool=True,**kwargs)->torch.Tensor:
+    def _stream_generate(self, input_ids: torch.Tensor, eos_token_id: int,
+                         max_new_tokens: int = 1024, temperature: float = 0.75,
+                         top_p: float = 0.90,
+                         repetition_penalty: float = 1.0, use_cache: bool = True, **kwargs):
         """
 
         Args:
             eos_token_id: 结束符
             max_new_tokens: 最大新词数
             temperature: 温度
-            top_p: 
-            repetition_penalty: 
+            top_p:
+            repetition_penalty:
             use_cache: 是否使用缓存
             **kwargs:
 
         Returns:
-
         """
-                         
-        start,first_seq,past_kvs = input_ids.shape[1],True,None # 初始化开始位置、是否是第一个序列、是否使用缓存
-        while input_ids.shape[1] < max_new_tokens -1: # 当序列长度小于最大新词数时
-            if first_seq or not use_cache: # 如果是第一个序列或者不使用缓存
-                out = self.forward(input_ids, past_key_values=past_kvs,use_cache=use_cache,**kwargs) # 计算输出
-                first_seq = False # 设置为False
+
+        start, first_seq, past_kvs = input_ids.shape[1], True, None  # 初始化开始位置、是否是第一个序列、是否使用缓存
+        while input_ids.shape[1] < max_new_tokens - 1:  # 当序列长度小于最大新词数时
+            if first_seq or not use_cache:  # 如果是第一个序列或者不使用缓存
+                out = self.forward(input_ids, past_key_values=past_kvs, use_cache=use_cache, **kwargs)  # 计算输出
+                first_seq = False  # 设置为False
             else:
                 # 如果不是第一个序列，则使用缓存,输入的input_ids是最后一个token，start_pos是最后一个token的位置（因为前面的序列已经计算过了）
-                out = self.forward(input_ids[:,-1:], pask_key_values=past_kvs,
-                                   use_cache=use_cache,start_pos=input_ids.shape[1]- 1,**kwargs) 
-                
-            logits,past_kvs = out.logits[:,-1,:],out.past_key_values # 获取最后一个token的logits和past_kvs
+                out = self.forward(input_ids[:, -1:], pask_key_values=past_kvs,
+                                   use_cache=use_cache, start_pos=input_ids.shape[1] - 1, **kwargs)
+
+            logits, past_kvs = out.logits[:, -1, :], out.past_key_values  # 获取最后一个token的logits和past_kvs
             # 对当前已生成的 token（即在 input_ids 中出现过的 token）对应的 logits 值进行“惩罚”，除以一个 repetition_penalty 值。
             # 这样做可以降低重复 token 的生成概率，从而减少重复。
-            logits[:,list(set(input_ids.tolist()[0]))] /= repetition_penalty 
+            logits[:, list(set(input_ids.tolist()[0]))] /= repetition_penalty
             # 使用 temperature 参数来控制生成结果的多样性。
             logits /= (temperature + 1e-9)
             if top_p is not None and top_p < 1.0:
                 # 对 logits 进行排序，并计算累积概率
-                sorted_logits,sorted_indices = torch.sort(logits,descending=True,dim=-1)
-                
-                sorted_probs = F.softmax(sorted_logits,dim=-1)
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+
+                sorted_probs = F.softmax(sorted_logits, dim=-1)
                 # torch.cumsum()函数用于对输入张量进行累加和操作，返回一个新的张量，其中每个元素都是原张量中对应位置及之前所有元素的累加和。
-                cumulative_probs = torch.cumsum(sorted_probs,dim=-1)
+                cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
                 # 如果累积概率大于 top_p，则将该位置的索引标记为需要移除的索引。
-                sorted_indices_to_remove = cumulative_probs > top_p 
+                sorted_indices_to_remove = cumulative_probs > top_p
                 # 将需要移除的索引向右移动一位，确保索引 0 不会被移除。
-                sorted_indices_to_remove[:,1:] = sorted_indices_to_remove[:,:-1].clone()
-                sorted_indices_to_remove[:,0] = False # 确保索引 0 不会被移除
+                sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+                sorted_indices_to_remove[:, 0] = False  # 确保索引 0 不会被移除
                 # TODO 理解scatter函数
-                indices_to_remove = sorted_indices_to_remove.scatter(1,sorted_indices,sorted_indices_to_remove)
+                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
                 # 将需要移除的索引设置为 -inf，这样在后续的 softmax 操作中，这些位置的概率将变为 0。
                 sorted_logits[indices_to_remove] = -float('inf')
             # 使用 torch.multinomial 函数从概率分布中随机采样一个 token。
-            input_ids_next = torch.multinomial(F.softmax(sorted_logits,dim=-1),num_samples=1)
-            input_ids = torch.cat([input_ids,input_ids_next],dim=1)
-            yield input_ids[:,start:] # 返回当前生成的序列
-            if input_ids_next == eos_token_id: # 如果生成的token是结束符，则停止生成
+            input_ids_next = torch.multinomial(F.softmax(sorted_logits, dim=-1), num_samples=1)
+            input_ids = torch.cat([input_ids, input_ids_next], dim=1)
+            yield input_ids[:, start:]  # 返回当前生成的序列
+            if input_ids_next == eos_token_id:  # 如果生成的token是结束符，则停止生成
                 break
-            
+
 
 if __name__ == "__main__":
     rms_norm = RMSNorm(dim=10, eps=1e-5)
