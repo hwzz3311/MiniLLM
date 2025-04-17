@@ -98,7 +98,11 @@ def main():
     this_dir = os.path.dirname(os.path.abspath(__file__))
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     dtype = torch.bfloat16 if device == "cuda" else torch.float32  # cuda 使用 bfloat16 精度，mps 使用 float32 精度
-    tokenizer_path = os.path.join(this_dir, "./assets/tokenizer_output")
+
+    train_tokenizer_path = os.path.join(this_dir,"./assets/tokenizer_output")
+    qwen_tokenizer_path = os.path.join(this_dir,"./assets/qwen_tokenizer")
+    tokenizer_path = train_tokenizer_path
+
     default_data_path = os.path.join(this_dir, "./assets/data_sample/wikipedia_zh_sample_data.json")
     model_dir = os.path.join(this_dir, "./output/dim_512/n_layers_8")
     # 获取模型目录下所有文件,安装创建时间进行倒序，
