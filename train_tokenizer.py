@@ -1,30 +1,33 @@
 import json
 import os
+import psutil
+import gc
 
 from tokenizers import models, Tokenizer, decoders, trainers, processors, pre_tokenizers
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, AutoTokenizer
 from src.data.data_processing import load_data
+from src.data.utils import compute_tokenizer_metrics
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
 
 def train_tokenizer(pre_train_data_path, output_dir):
-    def iterative_load_data(data_path):
+    def iterative_load_data(data_path, batch_size=100 * 100 * 50): # 50w条数据
+        """使用生成器逐批加载数据"""
         training_corpus_list = load_data(data_path, iterative=True)
+        batch = []
         for item in training_corpus_list:
-            yield item["text"]
+            batch.append(item["text"])
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+        if batch:  # 处理剩余的样本
+            yield batch
 
-    training_corpus = iterative_load_data(pre_train_data_path)
-    # 添加调试信息
-    sample_count = 0
-    char_count = 0
-    for text in training_corpus:
-        sample_count += 1
-        char_count += len(text)
-        if sample_count % 10000 == 0:
-            print(f"已处理 {sample_count} 个样本，总字符数: {char_count}")
-
-    training_corpus = iterative_load_data(pre_train_data_path)
+    # 添加内存监控
+    def get_memory_usage():
+        process = psutil.Process()
+        return process.memory_info().rss / 1024 / 1024  # MB
 
     # 定义特殊token列表
     special_tokens = [
@@ -57,17 +60,32 @@ def train_tokenizer(pre_train_data_path, output_dir):
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     # 设置解码器
     tokenizer.decoder = decoders.ByteLevel()
-    # 从数据文件加载训练数据
+
+    # 先统计词频
+    word_freq = {}
+    for batch in iterative_load_data(pre_train_data_path):
+        for text in batch:
+            # 统计词频
+            words = text.split()
+            for word in words:
+                word_freq[word] = word_freq.get(word, 0) + 1
     # 配置BPE训练器
     trainer = trainers.BpeTrainer(
-        vocab_size=6400,  # 词汇表大小
-        min_frequency=2,  # 最小词频
-        special_tokens=special_tokens,  # 特殊标记列表
-        show_progress=True,  # 显示进度
-        initial_alphabet=pre_tokenizers.ByteLevel.alphabet()  # 初始字母表
+        vocab_size=6400,
+        min_frequency=2,
+        special_tokens=special_tokens,
+        show_progress=True,
+        initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+        word_frequency=word_freq
     )
-    # 训练tokenizer
-    tokenizer.train_from_iterator(training_corpus, trainer=trainer)
+
+    # 分批训练tokenizer
+    for batch_idx, batch in enumerate(iterative_load_data(pre_train_data_path)):
+        print(f"处理第 {batch_idx} 批数据，当前内存使用: {get_memory_usage():.2f} MB")
+        tokenizer.train_from_iterator(batch, trainer=trainer)
+        # 每处理完一批数据后清理内存
+        gc.collect()
+
     # 设置后处理器
     tokenizer.post_processor = processors.ByteLevel(trim_offsets=False)
 
@@ -78,16 +96,16 @@ def train_tokenizer(pre_train_data_path, output_dir):
 
     # 创建基础配置
     config = PretrainedConfig(
-        tokenizer_class="Qwen2Tokenizer",
+        tokenizer_class="MiniLLMTokenizer",
         model_max_length=131072,
         pad_token="<|endoftext|>",  # 用于将序列填充到固定长度的标记
         eos_token="<|endoftext|>",  # 用于表示序列结束的标记  在很多场景下，文本的结束和填充在语义上是等价的
-        add_bos_token=False,  # 是否添加开始标记
+        add_bos_token=True,  #,  # 是否添加开始标记
         add_prefix_space=False,  # 是否在单词前添加空格
-        bos_token=None,  # 开始标记
+        bos_token="<|startoftext|>",  # 开始标记
         clean_up_tokenization_spaces=False,  # 是否清理分词结果中的多余空格
         split_special_tokens=False,  # 是否分割特殊标记
-        unk_token=None,  #
+        unk_token="<|unk|>",  #
         chat_template="{%- if tools %}\n    {{- '<|im_start|>system\\n' }}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- messages[0]['content'] }}\n    {%- else %}\n        {{- 'You are a helpful assistant.' }}\n    {%- endif %}\n    {{- \"\\n\\n# Tools\\n\\nYou may call one or more functions to assist with the user query.\\n\\nYou are provided with function signatures within <tools></tools> XML tags:\\n<tools>\" }}\n    {%- for tool in tools %}\n        {{- \"\\n\" }}\n        {{- tool | tojson }}\n    {%- endfor %}\n    {{- \"\\n</tools>\\n\\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\\n<tool_call>\\n{\\\"name\\\": <function-name>, \\\"arguments\\\": <args-json-object>}\\n</tool_call><|im_end|>\\n\" }}\n{%- else %}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' }}\n    {%- else %}\n        {{- '<|im_start|>system\\nYou are a helpful assistant.<|im_end|>\\n' }}\n    {%- endif %}\n{%- endif %}\n{%- for message in messages %}\n    {%- if (message.role == \"user\") or (message.role == \"system\" and not loop.first) or (message.role == \"assistant\" and not message.tool_calls) %}\n        {{- '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>' + '\\n' }}\n    {%- elif message.role == \"assistant\" %}\n        {{- '<|im_start|>' + message.role }}\n        {%- if message.content %}\n            {{- '\\n' + message.content }}\n        {%- endif %}\n        {%- for tool_call in message.tool_calls %}\n            {%- if tool_call.function is defined %}\n                {%- set tool_call = tool_call.function %}\n            {%- endif %}\n            {{- '\\n<tool_call>\\n{\"name\": \"' }}\n            {{- tool_call.name }}\n            {{- '\", \"arguments\": ' }}\n            {{- tool_call.arguments | tojson }}\n            {{- '}\\n</tool_call>' }}\n        {%- endfor %}\n        {{- '<|im_end|>\\n' }}\n    {%- elif message.role == \"tool\" %}\n        {%- if (loop.index0 == 0) or (messages[loop.index0 - 1].role != \"tool\") %}\n            {{- '<|im_start|>user' }}\n        {%- endif %}\n        {{- '\\n<tool_response>\\n' }}\n        {{- message.content }}\n        {{- '\\n</tool_response>' }}\n        {%- if loop.last or (messages[loop.index0 + 1].role != \"tool\") %}\n            {{- '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n{%- endif %}\n",
     )
 
@@ -183,8 +201,40 @@ def save_tokenizer_files(tokenizer, output_dir):
 
 if __name__ == '__main__':
     # pre_train_data_path = os.path.join(current_dir, "./data_sample/baidubaike_sample_data.json")
-    pre_train_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data.parquet"
+    # pre_train_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_512max.parquet"
+    pre_train_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet"
     output_dir = os.path.join(current_dir, "./assets/tokenizer_output")
 
-    train_tokenizer(pre_train_data_path, output_dir)
-    eval_tokenizer(output_dir)
+    # train_tokenizer(pre_train_data_path, output_dir)
+    # eval_tokenizer(output_dir)
+    # 计算tokenizer的压缩率等指标
+    texts = ["我爱自然语言处理。", "ChatGPT 是一个大型语言模型。"]
+    tokenizer = AutoTokenizer.from_pretrained(output_dir)
+    print(len(tokenizer))
+    print(len(tokenizer.get_vocab()))
+    print(tokenizer.vocab_size)
+    # res = compute_tokenizer_metrics(texts, tokenizer)
+    # print(res)
+    # 将Qwen2Tokenizer 下载到本地
+    # tokenizer_path = os.path.join(current_dir, "./assets/qwen_tokenizer/")
+    # tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+    # s = {'text': '<s>鉴别一组中文文章的风格和特点，例如官方、口语、文言等。需要提供样例文章才能准确鉴别不同的风格和特点。</s> <s>好的，现在帮我查一下今天的天气怎么样?今天的天气依据地区而异。请问你需要我帮你查询哪个地区的天气呢？</s> <s>打开闹钟功能，定一个明天早上七点的闹钟。好的，我已经帮您打开闹钟功能，闹钟将在明天早上七点准时响起。</s> <s>为以下场景写一句话描述：一个孤独的老人坐在公园长椅上看着远处。一位孤独的老人坐在公园长椅上凝视远方。</s> <s>非常感谢你的回答。请告诉我，这些数据是关于什么主题的？这些数据是关于不同年龄段的男女人口比例分布的。</s> <s>帮我想一个有趣的标题。这个挺有趣的："如何成为一名成功的魔术师" 调皮的标题往往会吸引读者的注意力。</s> <s>回答一个问题，地球的半径是多少？地球的平均半径约为6371公里，这是地球自赤道到两极的距离的平均值。</s> <s>识别文本中的语气，并将其分类为喜悦、悲伤、惊异等。\n文本："今天是我的生日！"这个文本的语气是喜悦。</s>'}
+    # print(s["text"])
+    # text_list = s["text"].replace("</s>", "").split("<s>")
+    # for text in text_list:
+    #     print(text)
+    #     print(tokenizer.encode(text))
+    #     print(tokenizer.decode(tokenizer.encode(text)))
+    #     print("-"*100)
+    # # 获取tokenizer中的 bos_token 和 eos_token，pad_token，unk_token
+    # print("bos_token:", tokenizer.bos_token)
+    # print("eos_token:", tokenizer.eos_token)
+    # print("pad_token:", tokenizer.pad_token)
+    # print("unk_token:", tokenizer.unk_token)
+
+    # # 判断下<s>和</s>是否为tokenizer的特殊token
+    # print(tokenizer.special_tokens_map)
+    # print("tokenizer size:", tokenizer.vocab_size)
+    
+    # tokenizer.save_pretrained(tokenizer_path)
+
