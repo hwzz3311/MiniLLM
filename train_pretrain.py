@@ -35,7 +35,27 @@ def init_distributed_mode():
     
 def init_model(lm_config:MiniLLMConfig,tokenizer_path:str):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    # from src.model.minimind_model import MiniMindLM as MiniLLM
+
     model = MiniLLM(lm_config)
+    
+    # 添加更详细的初始化检查
+    for name, param in model.named_parameters():
+        if torch.isnan(param).any():
+            Log(f"警告：参数 {name} 在初始化时包含 NaN 值")
+            Log(f"  - 形状: {param.shape}")
+            Log(f"  - 数据类型: {param.dtype}")
+            Log(f"  - 统计信息:")
+            Log(f"    - 最大值: {param.max().item()}")
+            Log(f"    - 最小值: {param.min().item()}")
+            Log(f"    - 平均值: {param.mean().item()}")
+            Log(f"    - 标准差: {param.std().item()}")
+    
+    # 添加词表大小检查
+    Log(f"Tokenizer vocab size: {len(tokenizer)}")
+    Log(f"Model vocab size: {model.config.vocab_size}")
+    assert len(tokenizer) == model.config.vocab_size, "词表大小不匹配"
+    
     # 打印总的模型参数，单位为百万
     total_params = sum(p.numel() for p in model.parameters()) / 1e6
     Log(f"Total parameters: {total_params:.2f}M (million)")
@@ -45,62 +65,130 @@ def init_model(lm_config:MiniLLMConfig,tokenizer_path:str):
     Log(f"Trainable parameters ratio: {trainable_params/total_params:.2f}")
     return model,tokenizer
 
-def get_lr(current_iter:int,total_iters:int,base_lr:float):
+def get_lr(current_step, total_steps, lr,warmup_iters):
     """
-    获取当前学习率，使用余弦退火策略，学习率缓慢下降，最小值为：base_lr / 10
+    改进的学习率调度策略：
+    1. 添加预热阶段
+    2. 使用余弦退火
+    3. 设置最小学习率
     """
-    return base_lr / 10 + 0.5 * base_lr * (1 + math.cos(math.pi * current_iter / total_iters))
+    # 预热步数
+    warmup_steps = min(int(total_steps * 0.1), warmup_iters)  # 预热步数不超过500
+    min_lr = lr * 0.2  # 最小学习率为初始学习率的0.1倍
     
+    if current_step < warmup_steps:
+        # 使用更激进的预热
+        return lr * (current_step / warmup_steps) ** 0.5
+    else:
+        # 余弦退火
+        progress = (current_step - warmup_steps) / (total_steps - warmup_steps)
+        return min_lr + 0.5 * (lr - min_lr) * (1 + math.cos(math.pi * progress))
+
 def train_one_epoch(model,train_loader,optimizer,scaler,epoch,wandb):
     model.train()
-    iter_per_epoch = len(train_loader) # 每个 epoch 的迭代次数
-    loss_fn = CrossEntropyLoss(reduction="none") # 交叉熵损失函数,reduction="none" 表示不进行平均
+    iter_per_epoch = len(train_loader)
+    loss_fn = CrossEntropyLoss(reduction="none")
     start_time = time.time()
+    # 添加梯度检查
+    def check_gradients():
+        # 统计梯度范数的平均值
+        grad_norms = []
+        avg_grad_norm = 0
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                grad_norm = param.grad.norm().item()
+                grad_norms.append(grad_norm)
+                if grad_norm > 1000:  # 严重警告
+                    Log(f"严重警告：参数 {name} 的梯度范数过大: {grad_norm}")
+                    torch.nn.utils.clip_grad_norm_(param, 20.0) #
+                elif grad_norm > 100:  # 一般警告
+                    Log(f"警告：参数 {name} 的梯度范数较大: {grad_norm}")
+                elif grad_norm < 0.01:  # 梯度消失警告
+                    Log(f"警告：参数 {name} 的梯度范数过小: {grad_norm}")
+        # 计算梯度范数的平均值
+        if len(grad_norms) > 0:
+            avg_grad_norm = sum(grad_norms) / len(grad_norms)
+        return avg_grad_norm
+    # 计算总步数
+    total_steps = args.epochs * iter_per_epoch
+    
     for step,batch in enumerate(tqdm(train_loader,desc=f"Training of epoch {epoch}",total=iter_per_epoch)):
         X,Y,loss_mask = batch
         X = X.to(args.device)
         Y = Y.to(args.device)
         loss_mask = loss_mask.to(args.device)
 
-        lr = get_lr(epoch * iter_per_epoch + step, args.epochs * iter_per_epoch, args.learning_rate)
+        # 计算当前步数
+        current_step = epoch * iter_per_epoch + step
+        
+        # 获取动态学习率
+        lr = get_lr(current_step, 
+                    total_steps, 
+                    args.learning_rate,
+                    args.warmup_iters)
+        # lr = get_lr(current_step, args.epochs * iter_per_epoch, args.learning_rate)
 
-        for param_group in optimizer.param_groups: # 更新学习率
+        # 更新学习率
+        for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
-
-        with ctx: # 上下文管理器，用于混合精度训练
+        with ctx:
             res = model(X)
-            """
-            logits 是模型在输出层没有经过 softmax 的原始输出值。
-            它代表模型对每个类别的“原始打分”，还没有被归一化成概率。比如对于语言模型来说：
-            •	如果你有一个词表（vocab）大小是 50000，模型每一步都会输出一个大小为 [batch_size, seq_len, vocab_size] 的 tensor；
-            •	这个输出就是对每个位置的 token，它属于每个词的“信心打分”——这个就是 logits。
-            logits 是 softmax 前的值，形状是 [B, T, V]，分别表示 batch、序列长度、词表大小。
-            """
-            # res.logits.shape： (batch_size, seq_len, vocab_size) 
-            # res.logits.view(-1,res.logits.size(-1)) -> (batch_size * seq_len, vocab_size)
-            # Y.view(-1) -> (batch_size * seq_len)
-            # CrossEntropyLoss 要求输入 logits 的 shape 是 (N, C) ，N 是样本数量，C 是类别数量;同时 target 的 shape 是 (N,)，其中每个值是类别的索引（即 token 的 ID）
-            loss = loss_fn(res.logits.view(-1,res.logits.size(-1)), Y.view(-1)).view(Y.size()) # 计算损失，最终整理成 (batch_size, seq_len) 的形状
-            loss = (loss * loss_mask).sum() / loss_mask.sum() # 计算损失的平均值 
-            loss += res.aux_loss # 添加辅助损失
-            loss = loss / args.accumulation_steps # 除以梯度累积次数
-        scaler.scale(loss).backward() # 反向传播
+            # logits = res.logits
+            
+            # # 检查 logits 是否包含 NaN
+            # if torch.isnan(logits).any():
+            #     Log(f"发现 NaN 值！")
+            #     # 检查每一层的输出
+            #     for name, module in model.named_modules():
+            #         if isinstance(module, torch.nn.Linear):
+            #             if hasattr(module, 'output'):
+            #                 output = module.output
+            #                 if torch.isnan(output).any():
+            #                     Log(f"层 {name} 的输出包含 NaN 值")
+            #                     Log(f"  - 形状: {output.shape}")
+            #                     Log(f"  - 统计信息:")
+            #                     Log(f"    - 最大值: {output.max().item()}")
+            #                     Log(f"    - 最小值: {output.min().item()}")
+            #                     Log(f"    - 平均值: {output.mean().item()}")
+            #                     Log(f"    - 标准差: {output.std().item()}")
+                
+            #     # 如果发现 NaN，跳过这个 batch
+            #     continue
+            
+            loss = loss_fn(
+                res.logits.view(-1,res.logits.size(-1)), 
+                Y.view(-1)
+                ).view(Y.size())
+            loss = (loss * loss_mask).sum() / loss_mask.sum()
+            loss += res.aux_loss
+            loss = loss / args.accumulation_steps
+            
+        scaler.scale(loss).backward()
         if (step +1) % args.accumulation_steps == 0:
-            scaler.unscale_(optimizer) # 取消缩放
-            torch.nn.utils.clip_grad_norm_(model.parameters(),args.grad_clip) # 梯度裁剪
-            scaler.step(optimizer) # 更新参数
-            scaler.update() # 更新缩放因子
-            optimizer.zero_grad(set_to_none=True) # 清空梯度
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
         
         if step % args.log_interval == 0 or step == iter_per_epoch - 1:
             spend_time = time.time() - start_time
-            Log(f"Epoch: [{epoch}/{args.epochs}] Step: [{step}/{iter_per_epoch}] loss: {loss.item() * args.accumulation_steps:.4f} lr: {optimizer.param_groups[-1]['lr']:.6f} spend_time: {spend_time / (step+1) * iter_per_epoch / 60 - spend_time // 60:.4f}min")
-        
+            Log(
+                'Epoch:[{}/{}]({}/{}) loss:{:.3f} lr:{:.12f} epoch_Time:{}min:'.format(
+                    epoch + 1,
+                    args.epochs,
+                    step,
+                    iter_per_epoch,
+                    loss.item() * args.accumulation_steps,
+                    optimizer.param_groups[-1]['lr'],
+                    spend_time / (step + 1) * iter_per_epoch // 60 - spend_time // 60))
+            
             if (wandb is not None) and (not ddp or dist.get_rank() == 0):
-                wandb.log({"loss": loss.item() * args.accumulation_steps,
+                log_dict = {"loss": loss.item() * args.accumulation_steps,
                            "lr": optimizer.param_groups[-1]['lr'],
-                           "epoch_Time": spend_time / (step + 1) * iter_per_epoch // 60 - spend_time // 60})
+                           }
+                wandb.log(log_dict)
 
         if (step + 1) % args.save_interval == 0 and (not ddp or dist.get_rank() ==0) or step == iter_per_epoch - 1:
             model.eval()
@@ -115,25 +203,114 @@ def train_one_epoch(model,train_loader,optimizer,scaler,epoch,wandb):
             Log(f"Save checkpoint to {ckp}")
             model.train()
 
+        # # 添加数值稳定性检查
+        # if torch.isnan(logits).any():
+        #     # 检查每一层的输出
+        #     for name, module in model.named_modules():
+        #         if hasattr(module, 'output'):
+        #             output = module.output
+        #             if torch.isnan(output).any():
+        #                 Log(f"层 {name} 的输出包含 NaN 值")
+        #                 Log(f"  - 形状: {output.shape}")
+        #                 Log(f"  - 统计信息:")
+        #                 Log(f"    - 最大值: {output.max().item()}")
+        #                 Log(f"    - 最小值: {output.min().item()}")
+        #                 Log(f"    - 平均值: {output.mean().item()}")
+        #                 Log(f"    - 标准差: {output.std().item()}")
+
+
+def train_epoch_old(model,train_loader,optimizer,scaler, epoch, wandb):
+    loss_fct = CrossEntropyLoss(reduction='none')
+    start_time = time.time()
+    iter_per_epoch = len(train_loader)
+    for step, (X, Y, loss_mask) in enumerate(train_loader):
+        X = X.to(args.device)
+        Y = Y.to(args.device)
+        loss_mask = loss_mask.to(args.device)
+
+        lr = get_lr(epoch * iter_per_epoch + step, args.epochs * iter_per_epoch, args.learning_rate)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+
+        with ctx:
+            res = model(X)
+            loss = loss_fct(
+                res.logits.view(-1, res.logits.size(-1)),
+                Y.view(-1)
+            ).view(Y.size())
+            loss = (loss * loss_mask).sum() / loss_mask.sum()
+            loss += res.aux_loss
+            loss = loss / args.accumulation_steps
+
+        scaler.scale(loss).backward()
+
+        if (step + 1) % args.accumulation_steps == 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
+            scaler.step(optimizer)
+            scaler.update()
+
+            optimizer.zero_grad(set_to_none=True)
+
+        if step % args.log_interval == 0:
+            spend_time = time.time() - start_time
+            Log(
+                'Epoch:[{}/{}]({}/{}) loss:{:.3f} lr:{:.12f} epoch_Time:{}min:'.format(
+                    epoch + 1,
+                    args.epochs,
+                    step,
+                    iter_per_epoch,
+                    loss.item() * args.accumulation_steps,
+                    optimizer.param_groups[-1]['lr'],
+                    spend_time / (step + 1) * iter_per_epoch // 60 - spend_time // 60))
+
+            if (wandb is not None) and (not ddp or dist.get_rank() == 0):
+                wandb.log({"loss": loss.item() * args.accumulation_steps,
+                           "lr": optimizer.param_groups[-1]['lr'],
+                           "epoch_Time": spend_time / (step + 1) * iter_per_epoch // 60 - spend_time // 60})
+
+        if (step + 1) % args.save_interval == 0 and (not ddp or dist.get_rank() == 0):
+            model.eval()
+            moe_path = '_moe' if lm_config.use_moe else ''
+            ckp = f'{args.save_dir}/pretrain_{lm_config.hidden_size}{moe_path}.pth'
+
+            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                state_dict = model.module.state_dict()
+            else:
+                state_dict = model.state_dict()
+
+            torch.save(state_dict, ckp)
+            model.train()
+
 
 if __name__ == "__main__":
     this_dir = os.path.dirname(os.path.abspath(__file__))
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
-    dtype = torch.bfloat16 if device == "cuda" else torch.float32 # cuda 使用 bfloat16 精度，mps 使用 float32 精度
-    tokenizer_path = os.path.join(this_dir,"./assets/tokenizer_output")
-    default_data_path = os.path.join(this_dir,"data_sample/baidubaike_wikipedia_sample_data.parquet")
-
-    model_dir = os.path.join(this_dir,"./output/dim_512/n_layers_8")
-    # 获取模型目录下所有文件,安装创建时间进行倒序，
-    model_files = os.listdir(model_dir)
-    model_files.sort(key=lambda x: os.path.getctime(os.path.join(model_dir, x)), reverse=True)
-    model_check_point_path = os.path.join(model_dir, model_files[0])
-    print(f"使用模型: {model_check_point_path}")
+    dtype = "bfloat16" if device == "cuda" else "float32" # cuda 使用 bfloat16 精度，mps 使用 float32 精度
+    train_tokenizer_path = os.path.join(this_dir,"./assets/tokenizer_output")
+    qwen_tokenizer_path = os.path.join(this_dir,"./assets/qwen_tokenizer")
+    minimind_tokenizer_path = os.path.join(this_dir,"./assets/minimind_tokenizer")
+    tokenizer_path = minimind_tokenizer_path
+    # default_data_path = os.path.join(this_dir,"data_sample/baidubaike_wikipedia_sample_data.parquet")
+    # default_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_1024max.parquet"
+    # default_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_512max.parquet"
+    default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet" # 更换为minimind数据集测试效果
+    out_dir = os.path.join(this_dir,"./minillm_output")
+    model_dir = os.path.join(out_dir,"dim_512/n_layers_8")
+    model_check_point_path = ""
+    if os.path.exists(model_dir):
+        # 获取模型目录下所有文件,安装创建时间进行倒序，
+        model_files = os.listdir(model_dir)
+        model_files.sort(key=lambda x: os.path.getctime(os.path.join(model_dir, x)), reverse=True)
+        if len(model_files) > 0:
+            model_check_point_path = os.path.join(model_dir, model_files[0])
+            print(f"使用模型: {model_check_point_path}")
 
     parser = argparse.ArgumentParser(description="Train  pretrain model")
-    parser.add_argument("--out_dir",type=str,default="output",help="The output directory")
+    parser.add_argument("--out_dir",type=str,default=out_dir,help="The output directory")
     parser.add_argument("--epochs",type=int,default=100)
-    parser.add_argument("--batch_size",type=int,default=1)
+    parser.add_argument("--batch_size",type=int,default=32)
     parser.add_argument("--learning_rate",type=float,default=5e-4)
     parser.add_argument("--checkpoint_path",default=model_check_point_path)
     parser.add_argument("--device",type=str,default=device)
@@ -143,16 +320,17 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers",type=int,default=1)
     parser.add_argument("--ddp",action="store_true")
     parser.add_argument("--local_rank",type=int,default=-1) # 分布式训练
-    parser.add_argument("--accumulation_steps",type=int,default=1) # 梯度累计
-    parser.add_argument("--grad_clip",type=float,default=1.0) # 梯度裁剪
-    parser.add_argument("--warmup_iters",type=int,default=100) # 预热步数
-    parser.add_argument("--log_interval",type=int,default=10) # 日志间隔
-    parser.add_argument("--save_interval",type=int,default=1000) # 保存间隔
+    parser.add_argument("--accumulation_steps",type=int,default=8) # 梯度累计
+    parser.add_argument("--grad_clip",type=float,default=1.0) # 梯度裁剪 暂时关闭
+    parser.add_argument("--warmup_iters",type=int,default=0) # 预热步数
+    parser.add_argument("--log_interval",type=int,default=100) # 日志间隔
+    parser.add_argument("--save_interval",type=int,default=100) # 保存间隔
     parser.add_argument("--dim",type=int,default=512) # 隐层维度
     parser.add_argument("--n_layers",type=int,default=8) # 层数
-    parser.add_argument("--max_seq_len",type=int,default=1024) # 最大序列长度
+    parser.add_argument("--max_seq_len",type=int,default=512) # 最大序列长度
     parser.add_argument("--use_moe",default=False,type=bool) # 是否使用 MoE
     parser.add_argument("--data_path",type=str,default=default_data_path) # 数据路径
+    
     args = parser.parse_args()
     Log("start training")
     print(args)
@@ -161,13 +339,16 @@ if __name__ == "__main__":
     lm_config = MiniLLMConfig(
         hidden_size=args.dim,
         n_layers=args.n_layers,
-        n_heads=8,
         max_seq_len=args.max_seq_len,
         use_moe=args.use_moe
     )
     Log(f"lm_config: {lm_config}")
     tokens_per_iter = args.batch_size * lm_config.max_seq_len # 每个迭代步的token数
-    torch.manual_seed(2025) # 设置随机种子
+
+    base_seed = 1337
+    torch.manual_seed(base_seed)
+    torch.cuda.manual_seed(base_seed)
+
     device_type = args.device
 
     args.wandb_run_name = f"MiniLLM_{args.max_seq_len}seq_{args.batch_size}B_{args.epochs}epochs_{args.dim}dim_{args.use_moe}moe_{args.n_layers}layers"
@@ -179,11 +360,6 @@ if __name__ == "__main__":
     if ddp:
         init_distributed_mode()
         args.device = torch.device(DEVICE)
-    if args.use_wandb and (not ddp or ddp_local_rank == 0): # 如果使用 wandb 且不是分布式训练或当前进程是主进程，则初始化 wandb
-        import wandb 
-        wandb.init(project=args.wandb_project,name=args.wandb_run_name,config=vars(args))
-    else:
-        wandb = None
     Log("loading model")
     model,tokenizer = init_model(lm_config,tokenizer_path)
     if args.checkpoint_path:
@@ -193,26 +369,40 @@ if __name__ == "__main__":
     Log("loading data")
     train_ds = PretrainDataset(args.data_path,
                                tokenizer,
-                               args.max_seq_len)
+                               args.max_seq_len,
+                               num_workers=1)
     train_sampler = DistributedSampler(train_ds) if ddp else None # 分布式训练的采样器
     train_loader = DataLoader(
         train_ds,
         batch_size = args.batch_size,
         pin_memory=True, # 是否使用内存
         drop_last=True, # 是否丢弃最后一个批次
-        shuffle=False if ddp else True, # 是否打乱数据
+        shuffle=False, # 是否打乱数据
         num_workers=args.num_workers, # 使用的线程数
         sampler=train_sampler # 采样器
     )
     Log("loading optimizer")
     scaler = torch.amp.GradScaler(enabled=(args.dtype in ["bfloat16","float16"])) # 梯度缩放，用于防止梯度爆炸
-    optimizer = optim.AdamW(model.parameters(),lr=args.learning_rate) # 使用 AdamW 优化器
+    optimizer = optim.AdamW(model.parameters(),
+                            lr=args.learning_rate) # 使用 AdamW 优化器
     if ddp:
         Log("model distributed")
         model._ddp_params_and_buffers_to_ignore = {"pos_cis"} # 忽略分布式训练的参数
         model = DistributedDataParallel(model,device_ids = [ddp_local_rank]) # 分布式训练
     Log("training")
+    # 等待数据和模型都初始化后，再初始化 wandb
+    if args.use_wandb and (not ddp or ddp_local_rank == 0): # 如果使用 wandb 且不是分布式训练或当前进程是主进程，则初始化 wandb
+        import wandb
+        wandb.init(project=args.wandb_project,
+                   name=args.wandb_run_name,
+                   config=vars(args),
+                #    id="isditt15",
+                #    resume="must"
+                   )
+    else:
+        wandb = None
     for epoch in range(args.epochs):
         train_one_epoch(model,train_loader,optimizer,scaler,epoch,wandb)
+        # train_epoch_old(model,train_loader,optimizer,scaler,epoch,wandb)
 
     Log("done")

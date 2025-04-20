@@ -2,7 +2,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
 import torch.nn as nn
 import torch
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Union
 import torch.nn.functional as F
 import math
 from src.model.config import MiniLLMConfig
@@ -28,7 +28,7 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor):
         # 计算 RMSNorm 的前向传播
-        return self.weight * self._norm(x).type_as(x)  # 保持数据类型一致
+        return self.weight * self._norm(x.float()).type_as(x)  # 保持数据类型一致
 
     def _test_normalization(self):
         import matplotlib.pyplot as plt
@@ -232,7 +232,7 @@ class Attention(nn.Module):
         self.n_local_heads = config.n_heads  # 设置本地头数
         assert self.n_local_heads % self.n_kv_heads == 0  # 确保本地头数是kv头数的倍数
         self.n_local_kv_heads = self.n_kv_heads  # 设置本地kv头数
-        self.n_rep = self.n_local_heads // self.n_kv_heads  # 设置重复次数
+        self.n_rep = self.n_local_heads // self.n_local_kv_heads  # 设置重复次数
         self.head_dim = config.hidden_size // config.n_heads  # 设置头维度
         self.wq = nn.Linear(config.hidden_size, self.n_local_heads * self.head_dim, bias=False)  # 设置查询权重
         self.wk = nn.Linear(config.hidden_size, self.n_local_kv_heads * self.head_dim, bias=False)  # 设置键权重
@@ -252,7 +252,7 @@ class Attention(nn.Module):
                 x: torch.Tensor,
                 pos_cis: torch.Tensor,
                 past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-                use_cache=False):
+                use_cache=False,):
         bsz, seq_len, dim = x.shape  # 获取batch大小、序列长度和隐藏维度
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)  # 计算查询、键和值
         xq = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)  # 重塑查询
@@ -379,11 +379,12 @@ class MiniLLM(PreTrainedModel):
                 input_ids: Optional[torch.Tensor] = None,
                 pask_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
                 use_cache: bool = False,
+                logits_to_keep: Union[int, torch.Tensor] = 0,
                 **args) -> CausalLMOutputWithPast:
         past_key_values = pask_key_values or [None] * self.n_layers  # 初始化past_key_values
         start_pos = args.get("start_pos", 0)  # 获取开始位置
         h = self.dropout(self.tok_embeddings(input_ids))  # 计算词嵌入并应用dropout
-        pos_cis = self.pos_cis[start_pos:start_pos + input_ids.shape[1]]  # 获取位置编码
+        pos_cis = self.pos_cis[start_pos:start_pos + input_ids.shape[1]]  # 获取位置编码 
         past_kvs = []  # 初始化过去的键值对列表
         for l, layer in enumerate(self.layers):
             h, past_kv = layer(
@@ -393,10 +394,13 @@ class MiniLLM(PreTrainedModel):
                 use_cache=use_cache  # 是否使用缓存
             )
             past_kvs.append(past_kv)  # 保存当前层的键值对
-        h = self.norm(h)  # 归一化
+        # 如果logits_to_keep是int，则使用slice(-logits_to_keep, None)，否则使用logits_to_keep
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        h = self.norm(h)[:, slice_indices, :]  # 归一化
         logits = self.output(h)  # 计算输出
         aux_loss = sum(
             l.feed_forward.aux_loss for l in self.layers if isinstance(l.feed_forward, MOEFeedForward))  # 计算辅助损失
+        self.OUT.__setitem__('last_hidden_state', h)
         self.OUT.__setitem__("logits", logits)  # 设置logits
         self.OUT.__setitem__("aux_loss", aux_loss)  # 设置辅助损失
         self.OUT.__setitem__("past_key_values", past_kvs)  # 设置past_key_values
@@ -518,12 +522,12 @@ class MiniLLM(PreTrainedModel):
                 # TODO 理解scatter函数
                 indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
                 # 将需要移除的索引设置为 -inf，这样在后续的 softmax 操作中，这些位置的概率将变为 0。
-                sorted_logits[indices_to_remove] = -float('inf')
+                logits[indices_to_remove] = -float('inf')
             # 使用 torch.multinomial 函数从概率分布中随机采样一个 token。
-            input_ids_next = torch.multinomial(F.softmax(sorted_logits, dim=-1), num_samples=1)
+            input_ids_next = torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
             input_ids = torch.cat([input_ids, input_ids_next], dim=1)
             yield input_ids[:, start:]  # 返回当前生成的序列
-            if input_ids_next == eos_token_id:  # 如果生成的token是结束符，则停止生成
+            if input_ids_next.item() == eos_token_id:  # 如果生成的token是结束符，则停止生成
                 break
 
 
