@@ -53,11 +53,10 @@ class PretrainDataset(Dataset):
         for sample in tqdm(chunk, desc="Tokenizing chunk"):
             # 确保添加特殊token
             text = sample['text']
-            if not text.startswith(self.tokenizer.bos_token):
+            if self.tokenizer.bos_token and not text.startswith(self.tokenizer.bos_token):
                 text = self.tokenizer.bos_token + text
-            if not text.endswith(self.tokenizer.eos_token):
+            if self.tokenizer.eos_token and not text.endswith(self.tokenizer.eos_token):
                 text = text + self.tokenizer.eos_token
-                
             encoding = self.tokenizer(
                 text,
                 truncation=False,
