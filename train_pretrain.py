@@ -219,70 +219,6 @@ def train_one_epoch(model,train_loader,optimizer,scaler,epoch,wandb):
         #                 Log(f"    - 标准差: {output.std().item()}")
 
 
-def train_epoch_old(model,train_loader,optimizer,scaler, epoch, wandb):
-    loss_fct = CrossEntropyLoss(reduction='none')
-    start_time = time.time()
-    iter_per_epoch = len(train_loader)
-    for step, (X, Y, loss_mask) in enumerate(train_loader):
-        X = X.to(args.device)
-        Y = Y.to(args.device)
-        loss_mask = loss_mask.to(args.device)
-
-        lr = get_lr(epoch * iter_per_epoch + step, args.epochs * iter_per_epoch, args.learning_rate)
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
-
-        with ctx:
-            res = model(X)
-            loss = loss_fct(
-                res.logits.view(-1, res.logits.size(-1)),
-                Y.view(-1)
-            ).view(Y.size())
-            loss = (loss * loss_mask).sum() / loss_mask.sum()
-            loss += res.aux_loss
-            loss = loss / args.accumulation_steps
-
-        scaler.scale(loss).backward()
-
-        if (step + 1) % args.accumulation_steps == 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-
-            scaler.step(optimizer)
-            scaler.update()
-
-            optimizer.zero_grad(set_to_none=True)
-
-        if step % args.log_interval == 0:
-            spend_time = time.time() - start_time
-            Log(
-                'Epoch:[{}/{}]({}/{}) loss:{:.3f} lr:{:.12f} epoch_Time:{}min:'.format(
-                    epoch + 1,
-                    args.epochs,
-                    step,
-                    iter_per_epoch,
-                    loss.item() * args.accumulation_steps,
-                    optimizer.param_groups[-1]['lr'],
-                    spend_time / (step + 1) * iter_per_epoch // 60 - spend_time // 60))
-
-            if (wandb is not None) and (not ddp or dist.get_rank() == 0):
-                wandb.log({"loss": loss.item() * args.accumulation_steps,
-                           "lr": optimizer.param_groups[-1]['lr'],
-                           "epoch_Time": spend_time / (step + 1) * iter_per_epoch // 60 - spend_time // 60})
-
-        if (step + 1) % args.save_interval == 0 and (not ddp or dist.get_rank() == 0):
-            model.eval()
-            moe_path = '_moe' if lm_config.use_moe else ''
-            ckp = f'{args.save_dir}/pretrain_{lm_config.hidden_size}{moe_path}.pth'
-
-            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                state_dict = model.module.state_dict()
-            else:
-                state_dict = model.state_dict()
-
-            torch.save(state_dict, ckp)
-            model.train()
-
 
 if __name__ == "__main__":
     this_dir = os.path.dirname(os.path.abspath(__file__))
@@ -291,12 +227,12 @@ if __name__ == "__main__":
     train_tokenizer_path = os.path.join(this_dir,"./assets/tokenizer_output")
     qwen_tokenizer_path = os.path.join(this_dir,"./assets/qwen_tokenizer")
     minimind_tokenizer_path = os.path.join(this_dir,"./assets/minimind_tokenizer")
-    tokenizer_path = minimind_tokenizer_path
+    tokenizer_path = qwen_tokenizer_path
     # default_data_path = os.path.join(this_dir,"data_sample/baidubaike_wikipedia_sample_data.parquet")
     # default_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_1024max.parquet"
     # default_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_512max.parquet"
     default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet" # 更换为minimind数据集测试效果
-    out_dir = os.path.join(this_dir,"./minillm_output")
+    out_dir = os.path.join(this_dir,"./minillm_qwen_tokenizer_output")
     model_dir = os.path.join(out_dir,"dim_512/n_layers_8")
     model_check_point_path = ""
     if os.path.exists(model_dir):
@@ -309,8 +245,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Train  pretrain model")
     parser.add_argument("--out_dir",type=str,default=out_dir,help="The output directory")
-    parser.add_argument("--epochs",type=int,default=100)
-    parser.add_argument("--batch_size",type=int,default=32)
+    parser.add_argument("--epochs",type=int,default=1)
+    parser.add_argument("--batch_size",type=int,default=8)
     parser.add_argument("--learning_rate",type=float,default=5e-4)
     parser.add_argument("--checkpoint_path",default=model_check_point_path)
     parser.add_argument("--device",type=str,default=device)
@@ -320,10 +256,10 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers",type=int,default=1)
     parser.add_argument("--ddp",action="store_true")
     parser.add_argument("--local_rank",type=int,default=-1) # 分布式训练
-    parser.add_argument("--accumulation_steps",type=int,default=8) # 梯度累计
+    parser.add_argument("--accumulation_steps",type=int,default=4) # 梯度累计
     parser.add_argument("--grad_clip",type=float,default=1.0) # 梯度裁剪 暂时关闭
     parser.add_argument("--warmup_iters",type=int,default=0) # 预热步数
-    parser.add_argument("--log_interval",type=int,default=100) # 日志间隔
+    parser.add_argument("--log_interval",type=int,default=10) # 日志间隔
     parser.add_argument("--save_interval",type=int,default=100) # 保存间隔
     parser.add_argument("--dim",type=int,default=512) # 隐层维度
     parser.add_argument("--n_layers",type=int,default=8) # 层数

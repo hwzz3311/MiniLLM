@@ -102,10 +102,12 @@ def main():
     train_tokenizer_path = os.path.join(this_dir,"./assets/tokenizer_output")
     qwen_tokenizer_path = os.path.join(this_dir,"./assets/qwen_tokenizer")
     minimind_tokenizer_path = os.path.join(this_dir,"./assets/minimind_tokenizer")
-    tokenizer_path = minimind_tokenizer_path
+    tokenizer_path = qwen_tokenizer_path
 
     default_data_path = os.path.join(this_dir, "./assets/data_sample/wikipedia_zh_sample_data.json")
-    model_output_dir = os.path.join(this_dir,"./minillm_output")
+    # model_output_dir = os.path.join(this_dir,"./minillm_output")
+    model_output_dir = os.path.join(this_dir,"./minillm_qwen_tokenizer_output")
+
     model_dir = os.path.join(model_output_dir,"dim_512/n_layers_8")
     # model_dir = model_output_dir
     # 获取模型目录下所有文件,安装创建时间进行倒序，
