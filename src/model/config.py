@@ -8,7 +8,7 @@ class MiniLLMConfig(PretrainedConfig):
                  n_layers: int = 8,
                  n_heads: int = 8,
                  n_kv_heads: int = 2,
-                 vocab_size: int = 151665,
+                 vocab_size: int = 6400,
                  intermediate_size: int = None,
                  multiple_of: int = 64,
                  rms_norm_eps: float = 1e-5,

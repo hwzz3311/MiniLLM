@@ -156,7 +156,9 @@ class PretrainDataset(Dataset):
         end_idx = start_idx + self.max_len
         
         input_ids = self._get_input_ids(start_idx, end_idx)
-        
+        # 尝试将input_ids 反推回去，看看是否能还原
+        # text_ = self.tokenizer.decode(input_ids)
+        # print(f"text: {text_}")
         # 添加长度检查
         if len(input_ids) == 0:
             raise ValueError(f"Empty input_ids at index {idx}")
