@@ -14,7 +14,8 @@ def init_model(args):
             dim=args.dim,
             n_layers=args.n_layers,
             max_seq_len=args.max_seq_len,
-            use_moe=args.use_moe
+            use_moe=args.use_moe,
+            vocab_size=len(tokenizer)
         ))
         state_dict = torch.load(args.model_path, map_location=args.device)
         # 删除所有以 'mask' 开头的键
@@ -99,14 +100,14 @@ def main():
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     dtype = torch.bfloat16 if device == "cuda" else torch.float32  # cuda 使用 bfloat16 精度，mps 使用 float32 精度
 
-    train_tokenizer_path = os.path.join(this_dir,"./assets/tokenizer_output")
+    minillm_tokenizer_path = os.path.join(this_dir,"./assets/minillm_tokenizer")
     qwen_tokenizer_path = os.path.join(this_dir,"./assets/qwen_tokenizer")
     minimind_tokenizer_path = os.path.join(this_dir,"./assets/minimind_tokenizer")
-    tokenizer_path = qwen_tokenizer_path
+    tokenizer_path = minillm_tokenizer_path
 
     default_data_path = os.path.join(this_dir, "./assets/data_sample/wikipedia_zh_sample_data.json")
     # model_output_dir = os.path.join(this_dir,"./minillm_output")
-    model_output_dir = os.path.join(this_dir,"./minillm_qwen_tokenizer_output")
+    model_output_dir = os.path.join(this_dir,"./assets/minillm_output")
 
     model_dir = os.path.join(model_output_dir,"dim_512/n_layers_8")
     # model_dir = model_output_dir

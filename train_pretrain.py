@@ -36,9 +36,16 @@ def init_distributed_mode():
 def init_model(lm_config:MiniLLMConfig,tokenizer_path:str):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     # from src.model.minimind_model import MiniMindLM as MiniLLM
-
-    model = MiniLLM(lm_config)
     
+    # 添加词表大小检查
+    Log(f"Tokenizer vocab size: {len(tokenizer)}")
+    Log(f"Model vocab size: {lm_config.vocab_size}")
+    if len(tokenizer) != lm_config.vocab_size:
+        Log(f"词表大小不匹配，请检查词表大小")
+        Log(f"强制将 模型词表大小 设置为 tokenizer 词表大小，{lm_config.vocab_size} -> {len(tokenizer)}")
+        lm_config.vocab_size = len(tokenizer)
+    
+    model = MiniLLM(lm_config)
     # 添加更详细的初始化检查
     for name, param in model.named_parameters():
         if torch.isnan(param).any():
@@ -50,12 +57,7 @@ def init_model(lm_config:MiniLLMConfig,tokenizer_path:str):
             Log(f"    - 最小值: {param.min().item()}")
             Log(f"    - 平均值: {param.mean().item()}")
             Log(f"    - 标准差: {param.std().item()}")
-    
-    # 添加词表大小检查
-    Log(f"Tokenizer vocab size: {len(tokenizer)}")
-    Log(f"Model vocab size: {model.config.vocab_size}")
-    assert len(tokenizer) == model.config.vocab_size, "词表大小不匹配"
-    
+
     # 打印总的模型参数，单位为百万
     total_params = sum(p.numel() for p in model.parameters()) / 1e6
     Log(f"Total parameters: {total_params:.2f}M (million)")
@@ -224,15 +226,14 @@ if __name__ == "__main__":
     this_dir = os.path.dirname(os.path.abspath(__file__))
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
     dtype = "bfloat16" if device == "cuda" else "float32" # cuda 使用 bfloat16 精度，mps 使用 float32 精度
-    train_tokenizer_path = os.path.join(this_dir,"./assets/tokenizer_output")
+    minillm_tokenizer_path = os.path.join(this_dir,"./assets/minillm_tokenizer")
     qwen_tokenizer_path = os.path.join(this_dir,"./assets/qwen_tokenizer")
     minimind_tokenizer_path = os.path.join(this_dir,"./assets/minimind_tokenizer")
-    tokenizer_path = qwen_tokenizer_path
+    tokenizer_path = minillm_tokenizer_path
     # default_data_path = os.path.join(this_dir,"data_sample/baidubaike_wikipedia_sample_data.parquet")
-    # default_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_1024max.parquet"
-    # default_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_512max.parquet"
-    default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet" # 更换为minimind数据集测试效果
-    out_dir = os.path.join(this_dir,"./minillm_qwen_tokenizer_output")
+    # default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet" # 更换为minimind数据集测试效果
+    default_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_512max.parquet" # 1.2G
+    out_dir = os.path.join(this_dir,"./assets/minillm_output")
     model_dir = os.path.join(out_dir,"dim_512/n_layers_8")
     model_check_point_path = ""
     if os.path.exists(model_dir):
@@ -246,7 +247,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train  pretrain model")
     parser.add_argument("--out_dir",type=str,default=out_dir,help="The output directory")
     parser.add_argument("--epochs",type=int,default=1)
-    parser.add_argument("--batch_size",type=int,default=8)
+    parser.add_argument("--batch_size",type=int,default=32)
     parser.add_argument("--learning_rate",type=float,default=5e-4)
     parser.add_argument("--checkpoint_path",default=model_check_point_path)
     parser.add_argument("--device",type=str,default=device)
@@ -256,11 +257,11 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers",type=int,default=1)
     parser.add_argument("--ddp",action="store_true")
     parser.add_argument("--local_rank",type=int,default=-1) # 分布式训练
-    parser.add_argument("--accumulation_steps",type=int,default=4) # 梯度累计
+    parser.add_argument("--accumulation_steps",type=int,default=8) # 梯度累计
     parser.add_argument("--grad_clip",type=float,default=1.0) # 梯度裁剪 暂时关闭
     parser.add_argument("--warmup_iters",type=int,default=0) # 预热步数
-    parser.add_argument("--log_interval",type=int,default=10) # 日志间隔
-    parser.add_argument("--save_interval",type=int,default=100) # 保存间隔
+    parser.add_argument("--log_interval",type=int,default=100) # 日志间隔
+    parser.add_argument("--save_interval",type=int,default=1000) # 保存间隔
     parser.add_argument("--dim",type=int,default=512) # 隐层维度
     parser.add_argument("--n_layers",type=int,default=8) # 层数
     parser.add_argument("--max_seq_len",type=int,default=512) # 最大序列长度
@@ -306,7 +307,7 @@ if __name__ == "__main__":
     train_ds = PretrainDataset(args.data_path,
                                tokenizer,
                                args.max_seq_len,
-                               num_workers=1)
+                               num_workers=16)
     train_sampler = DistributedSampler(train_ds) if ddp else None # 分布式训练的采样器
     train_loader = DataLoader(
         train_ds,
@@ -332,8 +333,8 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project,
                    name=args.wandb_run_name,
                    config=vars(args),
-                #    id="isditt15",
-                #    resume="must"
+                   id="9ov46iyz",
+                   resume="must"
                    )
     else:
         wandb = None
