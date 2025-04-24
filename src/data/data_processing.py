@@ -4,6 +4,7 @@ import gzip
 from tqdm import tqdm
 from pathlib import Path
 import os
+import orjson as json
 
 def load_data_iterative(data_path: str):
     file_ext = Path(data_path).suffix.lower()
@@ -114,44 +115,20 @@ def merge_data(data_dict: dict, split_key: str = "", min_length: int = 100,max_l
     return result_data
 
 
-    
 if __name__ == "__main__":
-    baidu_pretrain_data_path = "/mnt/d/pretrain/clean_step3/baidubaike/"
-    wikipedia_pretrain_data_path = "/mnt/d/pretrain/clean_step3/wikipedia_zh.parquet"
-    data_dict = {
-        wikipedia_pretrain_data_path: ["completion"]
-    }
-    for file_name in os.listdir(baidu_pretrain_data_path):
-        data_dict[os.path.join(baidu_pretrain_data_path, file_name)] = ["text"]
-    result_data = merge_data(data_dict, split_key="\n",min_length=20,max_length=1024 * 4)
-    out_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_20min_4096max.parquet"
-    save_data(result_data, out_path)
-
-    # minimind_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.jsonl"
-    # out_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet"
-    # data = load_data(minimind_data_path)
-    # result_data = []
-    # text_length_list = []
-    # for item in data:
-    #     text = item["text"]
-    #     text_list= text.replace("</s>", "").split("<s>")
-    #     for text in text_list:
-    #         text_length = len(text)
-    #         if text_length < 20:
-    #             continue
-    #         result_data.append({"text": text})
-    #         text_length_list.append(text_length)
-    # print(f"{len(result_data)=}")
-    # print(f"{sum(text_length_list)/len(text_length_list)=}")
-    # print(f"{max(text_length_list)=}")
-    # print(f"{min(text_length_list)=}")
-    # print(f"{sorted(text_length_list)[len(text_length_list)//2]=}")
+    # baidu_pretrain_data_path = "/mnt/d/pretrain/clean_step3/baidubaike/"
+    # wikipedia_pretrain_data_path = "/mnt/d/pretrain/clean_step3/wikipedia_zh.parquet"
+    # data_dict = {
+    #     wikipedia_pretrain_data_path: ["completion"]
+    # }
+    # for file_name in os.listdir(baidu_pretrain_data_path):
+    #     data_dict[os.path.join(baidu_pretrain_data_path, file_name)] = ["text"]
+    # result_data = merge_data(data_dict, split_key="\n",min_length=20,max_length=1024 * 4)
+    # out_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_20min_4096max.parquet"
     # save_data(result_data, out_path)
-    # data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data.parquet"
-    # data = load_data(data_path)
-    # print(len(data))
-    # for item in data:
-    #     print(item)
-    #     break
-    # print(len(data))
+
+    data_path = "/mnt/d/pretrain/minimind/sft_mini_512.jsonl"
+    out_path = "/mnt/d/pretrain/minimind/sft_mini_512.parquet"
+    result_data = load_data(data_path)
+    save_data(result_data,out_path)
     pass

@@ -215,7 +215,7 @@ if __name__ == '__main__':
     pre_train_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet"
     output_dir = os.path.join(current_dir, "./assets/minillm_tokenizer")
 
-    train_tokenizer(pre_train_data_path, output_dir)
+    # train_tokenizer(pre_train_data_path, output_dir)
     eval_tokenizer(output_dir)
     # 计算tokenizer的压缩率等指标
     texts = ["我爱自然语言处理。", "ChatGPT 是一个大型语言模型。"]

@@ -14,7 +14,7 @@ import torch.optim as optim
 from tqdm import tqdm
 
 from src.model.model import MiniLLM
-from src.data.dataset import PretrainDataset
+from src.data.dataset import PretrainDataset,SFT_Dataset
 from src.model.config import MiniLLMConfig
 
 
@@ -195,7 +195,7 @@ def train_one_epoch(model,train_loader,optimizer,scaler,epoch,wandb):
         if (step + 1) % args.save_interval == 0 and (not ddp or dist.get_rank() ==0) or step == iter_per_epoch - 1:
             model.eval()
             moe_path = "_moe" if lm_config.use_moe else ""
-            ckp = f"{args.save_dir}/dim_{args.dim}/n_layers_{args.n_layers}/epoch_{epoch}_step_{step}{moe_path}.pth"
+            ckp = f"{args.save_dir}/sft_epoch_{epoch}_step_{step}{moe_path}.pth"
             os.makedirs(os.path.dirname(ckp),exist_ok=True)
             if isinstance(model, torch.nn.parallel.DistributedDataParallel):
                 state_dict = model.module.state_dict()
@@ -232,9 +232,10 @@ if __name__ == "__main__":
     tokenizer_path = minillm_tokenizer_path
     # default_data_path = os.path.join(this_dir,"data_sample/baidubaike_wikipedia_sample_data.parquet")
     # default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet" # 更换为minimind数据集测试效果
-    default_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_512max.parquet" # 1.2G
-    out_dir = os.path.join(this_dir,"./assets/minillm_output")
-    model_dir = os.path.join(out_dir,"dim_512/n_layers_8")
+    default_data_path = "/mnt/d/pretrain/minimind/sft_mini_512.jsonl" # 1.2G
+    # out_dir = os.path.join(this_dir,"./assets/minillm_output")
+    out_dir = "/mnt/d/linux/LLM/MiniLLM/assets/minillm_output/pretrain/dim_512/n_layers_8"
+    model_dir = os.path.join(out_dir,"sft")
     model_check_point_path = ""
     if os.path.exists(model_dir):
         # 获取模型目录下所有文件，按照创建时间进行倒序。
@@ -304,10 +305,14 @@ if __name__ == "__main__":
         Log(f"load check_point {args.checkpoint_path} success!")
     model.to(args.device)
     Log("loading data")
-    train_ds = PretrainDataset(args.data_path,
-                               tokenizer,
-                               args.max_seq_len,
-                               num_workers=16)
+    # train_ds = PretrainDataset(args.data_path,
+    #                            tokenizer,
+    #                            args.max_seq_len,
+    #                            num_workers=16)
+    train_ds = SFT_Dataset(args.data_path,
+                          tokenizer,
+                          args.max_seq_len,
+                          num_workers=16)
     train_sampler = DistributedSampler(train_ds) if ddp else None # 分布式训练的采样器
     train_loader = DataLoader(
         train_ds,
