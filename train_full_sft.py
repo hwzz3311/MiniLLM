@@ -233,9 +233,8 @@ if __name__ == "__main__":
     # default_data_path = os.path.join(this_dir,"data_sample/baidubaike_wikipedia_sample_data.parquet")
     # default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet" # 更换为minimind数据集测试效果
     default_data_path = "/mnt/d/pretrain/minimind/sft_mini_512.jsonl" # 1.2G
-    # out_dir = os.path.join(this_dir,"./assets/minillm_output")
-    out_dir = "/mnt/d/linux/LLM/MiniLLM/assets/minillm_output/pretrain/dim_512/n_layers_8"
-    model_dir = os.path.join(out_dir,"sft")
+    out_dir = os.path.join(this_dir,"./assets/minillm_output/sft/dim_512/n_layers_8")
+    model_dir = os.path.join(out_dir,"")
     model_check_point_path = ""
     if os.path.exists(model_dir):
         # 获取模型目录下所有文件，按照创建时间进行倒序。
@@ -338,7 +337,7 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project,
                    name=args.wandb_run_name,
                    config=vars(args),
-                   id="9ov46iyz",
+                   id="meiwmto7",
                    resume="must"
                    )
     else:

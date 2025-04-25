@@ -288,7 +288,7 @@ class SFT_Dataset(Dataset):
         # 准备数据块
         chunks = [self.samples[i:i + self.chunk_size] 
                  for i in range(0, len(self.samples), self.chunk_size)]
-        chunks = chunks[:1] # 临时只处理一个，看看效果
+        # chunks = chunks[:1] # 临时只处理一个，看看效果
         
         # 使用线程池处理数据块
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:

@@ -107,7 +107,7 @@ def main():
 
     default_data_path = os.path.join(this_dir, "./assets/data_sample/wikipedia_zh_sample_data.json")
     # model_output_dir = os.path.join(this_dir,"./minillm_output")
-    model_output_dir = os.path.join(this_dir,"./assets/minillm_output")
+    model_output_dir = os.path.join(this_dir,"./assets/sft")
 
     model_dir = os.path.join(model_output_dir,"dim_512/n_layers_8")
     # model_dir = model_output_dir
@@ -135,7 +135,7 @@ def main():
     parser.add_argument("--history_cnt", type=int, default=0, help="The number of history context")
     parser.add_argument("--stream", type=bool, default=True, help="Whether to stream")
     parser.add_argument('--load', default=0, type=int, help="0: 原生torch权重，1: transformers加载")
-    parser.add_argument('--model_mode', default=0, type=int,
+    parser.add_argument('--model_mode', default=1, type=int,
                         help="0: 预训练模型，1: SFT-Chat模型，2: RLHF-Chat模型，3: Reason模型，4: RLAIF-Chat模型")
 
     args = parser.parse_args()
@@ -143,6 +143,10 @@ def main():
     prompt_datas = get_prompt_datas(args)
     test_model = int(input("[0] 自动测试\n[1] 手动测试\n"))
     messages = []
+    eos_token_id = tokenizer.eos_token_id
+    if args.model_mode == 1: # SFT-Chat模型
+        eos_token_id = tokenizer("<|im_end|>").input_ids[0]
+        print(f"SFT-Chat模型 eos_token_id: {eos_token_id}")
     for idx, prompt in enumerate(prompt_datas if test_model == 0 else iter(lambda: input('👶: '), '')):
         setup_seed(random.randint(0, 2048))  # 每次随机种子
         if test_model == 0:  # 自动测试模式下，需要打印出自动测试的prompt
@@ -162,7 +166,7 @@ def main():
             # x 的形状为 [1, seq_len]，既【batch_size, seq_len】
             outputs = model.generate(
                 x,
-                eos_token_id=tokenizer.eos_token_id,
+                eos_token_id=eos_token_id,
                 max_new_tokens=args.max_seq_len,
                 temperature=args.temperature,
                 stream=args.stream,
