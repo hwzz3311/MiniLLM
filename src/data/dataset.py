@@ -367,6 +367,9 @@ class SFT_Dataset(Dataset):
         return len(self.all_tokenized_samples)
 
     def _generate_loss_mask(self, input_ids):
+        """
+        只对 模型生成的 内容 进行损失掩码，其他部分为输入，不需要参与loss计算。
+        """
         loss_mask = [0] * len(input_ids)
         i = 0
         while i < len(input_ids):

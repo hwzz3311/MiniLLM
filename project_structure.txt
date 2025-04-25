@@ -1,0 +1,37 @@
+.
+├── README.md
+├── assets # 模型权重和词表，存放一些生成的大文件
+│   ├── minillm_output # 模型权重
+│   │   ├── pretrain # 预训练模型
+│   │   └── sft # SFT-Chat模型
+│   └── tokenizer_output # 词表
+│       ├── tokenizer.json
+│       ├── tokenizer_config.json
+│       ├── vocab.json
+│       └── vocab.txt
+├── eval_model.py # 评估模型的启动脚本
+├── experiments # 记录一些实验日志
+│   ├── pretrain
+│   │   ├── README.md # 预训练模型的实验日志
+│   ├── sft
+│   │   └── README.md # SFT-Chat模型的实验日志
+│   └── tokenizer
+│       └── README.md # 词表的实验日志
+├── pyproject.toml # 项目配置
+├── requirements.txt # 项目依赖
+├── src # 项目源码
+│   ├── data # 数据处理
+│   │   ├── __init__.py 
+│   │   ├── data_processing.py # 数据处理
+│   │   ├── dataset.py # 数据加载
+│   │   └── utils.py # 工具函数
+│   ├── model
+│   │   ├── __init__.py
+│   │   ├── config.py # 模型配置
+│   │   └── model.py # 模型定义
+├── train_full_sft.py # 全量SFT训练脚本
+├── train_pretrain.py # 预训练脚本
+├── train_tokenizer.py # 词表训练脚本
+
+# shell 
+    # tree -I "__pycache__|.DS_Store" -L 3 --noreport -T "/" | sed 's/|--/├──/g' | sed 's/`--/└──/g' > project_structure.txt
