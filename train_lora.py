@@ -16,6 +16,7 @@ from tqdm import tqdm
 from src.model.model import MiniLLM
 from src.data.dataset import PretrainDataset,SFT_Dataset
 from src.model.config import MiniLLMConfig
+from src.model.model_lora import apply_lora,load_lora,save_lora
 
 
 def Log(message:str):
@@ -65,7 +66,10 @@ def init_model(lm_config:MiniLLMConfig,tokenizer_path:str):
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
     Log(f"Trainable parameters: {trainable_params:.2f}M (million)")
     Log(f"Trainable parameters ratio: {trainable_params/total_params:.2f}")
+    
     return model,tokenizer
+
+
 
 def get_lr(current_step, total_steps, lr,warmup_iters):
     """
@@ -195,13 +199,15 @@ def train_one_epoch(model,train_loader,optimizer,scaler,epoch,wandb):
         if (step + 1) % args.save_interval == 0 and (not ddp or dist.get_rank() ==0) or step == iter_per_epoch - 1:
             model.eval()
             moe_path = "_moe" if lm_config.use_moe else ""
-            ckp = f"{args.save_dir}/sft_epoch_{epoch}_step_{step}{moe_path}.pth"
+            lora_target_layers_str = "&".join(args.lora_target_layers)
+            ckp = f"{args.save_dir}/lora_epoch_{epoch}_step_{step}{moe_path}_rank_{args.lora_rank}_{lora_target_layers_str}.pth"
             os.makedirs(os.path.dirname(ckp),exist_ok=True)
-            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                state_dict = model.module.state_dict()
-            else:
-                state_dict = model.state_dict()
-            torch.save(state_dict,ckp)
+            # if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            #     state_dict = model.module.state_dict()
+            # else:
+            #     state_dict = model.state_dict()
+            # torch.save(state_dict,ckp)
+            save_lora(model,ckp)
             Log(f"Save checkpoint to {ckp}")
             model.train()
 
@@ -233,8 +239,8 @@ if __name__ == "__main__":
     # default_data_path = os.path.join(this_dir,"data_sample/baidubaike_wikipedia_sample_data.parquet")
     # default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet" # 更换为minimind数据集测试效果
     default_data_path = "/mnt/d/pretrain/minimind/sft_mini_512.jsonl" # 1.2G
-    out_dir = os.path.join(this_dir,"./assets/minillm_output/sft/dim_512/n_layers_8")
-    model_dir = os.path.join(out_dir,"")
+    model_out_dir = os.path.join(this_dir,"./assets/minillm_output/sft/dim_512/n_layers_8")
+    model_dir = os.path.join(model_out_dir,"")
     model_check_point_path = ""
     if os.path.exists(model_dir):
         # 获取模型目录下所有文件，按照创建时间进行倒序。
@@ -243,13 +249,27 @@ if __name__ == "__main__":
         if len(model_files) > 0:
             model_check_point_path = os.path.join(model_dir, model_files[0])
             print(f"使用模型: {model_check_point_path}")
+    # 加载 lora 模型
+    lora_out_dir = os.path.join(this_dir,"./assets/minillm_output/sft_lora/dim_512/n_layers_8")
+    lora_check_point_path = ""
+    if os.path.exists(lora_out_dir):
+        # 获取模型目录下所有文件，按照创建时间进行倒序。
+        lora_model_files = os.listdir(lora_out_dir)
+        lora_model_files.sort(key=lambda x: os.path.getctime(os.path.join(lora_out_dir, x)), reverse=True)
+        if len(lora_model_files) > 0:
+            lora_check_point_path = os.path.join(lora_out_dir, lora_model_files[0])
+            print(f"使用 LoRA 模型: {lora_check_point_path}")
 
     parser = argparse.ArgumentParser(description="Train  pretrain model")
-    parser.add_argument("--out_dir",type=str,default=out_dir,help="The output directory")
+    parser.add_argument("--out_dir",type=str,default=lora_out_dir,help="The output directory")
     parser.add_argument("--epochs",type=int,default=2)
     parser.add_argument("--batch_size",type=int,default=32)
     parser.add_argument("--learning_rate",type=float,default=5e-4)
     parser.add_argument("--checkpoint_path",default=model_check_point_path)
+    # 增加 lora的checkpoint
+    parser.add_argument("--lora_checkpoint_path",default=lora_check_point_path)
+    parser.add_argument("--lora_rank",default=4,type=int)
+    parser.add_argument("--lora_target_layers", default=["wq","wv","wo"],type=list)
     parser.add_argument("--device",type=str,default=device)
     parser.add_argument("--dtype",type=str,default=dtype)
     parser.add_argument("--use_wandb",action="store_true",default=True)
@@ -261,7 +281,7 @@ if __name__ == "__main__":
     parser.add_argument("--grad_clip",type=float,default=1.0) # 梯度裁剪 暂时关闭
     parser.add_argument("--warmup_iters",type=int,default=0) # 预热步数
     parser.add_argument("--log_interval",type=int,default=100) # 日志间隔
-    parser.add_argument("--save_interval",type=int,default=1000) # 保存间隔
+    parser.add_argument("--save_interval",type=int,default=100) # 保存间隔
     parser.add_argument("--dim",type=int,default=512) # 隐层维度
     parser.add_argument("--n_layers",type=int,default=8) # 层数
     parser.add_argument("--max_seq_len",type=int,default=512) # 最大序列长度
@@ -303,6 +323,28 @@ if __name__ == "__main__":
         model.load_state_dict(torch.load(args.checkpoint_path))
         Log(f"load check_point {args.checkpoint_path} success!")
     model.to(args.device)
+    # 应用 LoRA 模型
+    # 应用 LoRA 模型
+    apply_lora(model,args.lora_rank,args.lora_target_layers)
+
+    total_params = sum(p.numel() for p in model.parameters()) / 1e6 # 总参数数量
+    lora_params_count = sum(p.numel() for name, p in model.named_parameters() if 'lora' in name) / 1e6 # LoRA 参数数量
+    if not ddp or dist.get_rank() == 0:
+        print(f"LLM 总参数量: {total_params}")
+        print(f"LoRA 参数量: {lora_params_count}")
+        print(f"LoRA 参数占比: {lora_params_count / total_params * 100:.2f}%")
+    if args.lora_checkpoint_path:
+        load_lora(model,args.lora_checkpoint_path)
+        Log(f"load lora check_point {args.lora_checkpoint_path} success!")
+    # 将非 LoRA 参数设置为不训练
+    for name, param in model.named_parameters():
+        if 'lora' not in name:
+            param.requires_grad = False
+    # 获取需要训练的 LoRA 参数
+    lora_params = []
+    for name, param in model.named_parameters():
+        if 'lora' in name:
+            lora_params.append(param)
     Log("loading data")
     # train_ds = PretrainDataset(args.data_path,
     #                            tokenizer,
@@ -325,7 +367,7 @@ if __name__ == "__main__":
     )
     Log("loading optimizer")
     scaler = torch.amp.GradScaler(enabled=(args.dtype in ["bfloat16","float16"])) # 梯度缩放，用于防止梯度爆炸
-    optimizer = optim.AdamW(model.parameters(),
+    optimizer = optim.AdamW(lora_params, # 此处只训练 LoRA 参数
                             lr=args.learning_rate) # 使用 AdamW 优化器
     if ddp:
         Log("model distributed")
@@ -338,8 +380,8 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project,
                    name=args.wandb_run_name,
                    config=vars(args),
-                   id="meiwmto7",
-                   resume="must"
+                #    id="meiwmto7",
+                #    resume="must"
                    )
     else:
         wandb = None

@@ -107,7 +107,7 @@ def main():
 
     default_data_path = os.path.join(this_dir, "./assets/data_sample/wikipedia_zh_sample_data.json")
     # model_output_dir = os.path.join(this_dir,"./minillm_output")
-    model_output_dir = os.path.join(this_dir,"./assets/sft")
+    model_output_dir = os.path.join(this_dir,"./assets/minillm_output/sft")
 
     model_dir = os.path.join(model_output_dir,"dim_512/n_layers_8")
     # model_dir = model_output_dir
