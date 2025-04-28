@@ -231,10 +231,11 @@ if __name__ == "__main__":
     minimind_tokenizer_path = os.path.join(this_dir,"./assets/minimind_tokenizer")
     tokenizer_path = minillm_tokenizer_path
     # default_data_path = os.path.join(this_dir,"data_sample/baidubaike_wikipedia_sample_data.parquet")
-    # default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet" # 更换为minimind数据集测试效果
-    default_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_512max.parquet" # 1.2G
-    out_dir = os.path.join(this_dir,"./assets/minillm_output")
-    model_dir = os.path.join(out_dir,"dim_512/n_layers_8")
+    default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet" # 更换为minimind数据集测试效果
+    # default_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_512max.parquet" # 1.2G
+    out_dir = os.path.join(this_dir,"./assets/minillm_output/moe")
+    use_moe = True
+    model_dir = os.path.join(out_dir,"dim_512/n_layers_8/")
     model_check_point_path = ""
     if os.path.exists(model_dir):
         # 获取模型目录下所有文件，按照创建时间进行倒序。
@@ -265,7 +266,7 @@ if __name__ == "__main__":
     parser.add_argument("--dim",type=int,default=512) # 隐层维度
     parser.add_argument("--n_layers",type=int,default=8) # 层数
     parser.add_argument("--max_seq_len",type=int,default=512) # 最大序列长度
-    parser.add_argument("--use_moe",default=False,type=bool) # 是否使用 MoE
+    parser.add_argument("--use_moe",default=use_moe,type=bool) # 是否使用 MoE
     parser.add_argument("--data_path",type=str,default=default_data_path) # 数据路径
     
     args = parser.parse_args()
@@ -333,7 +334,7 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project,
                    name=args.wandb_run_name,
                    config=vars(args),
-                   id="9ov46iyz",
+                   id="59y16of0",
                    resume="must"
                    )
     else:

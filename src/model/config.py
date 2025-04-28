@@ -22,7 +22,7 @@ class MiniLLMConfig(PretrainedConfig):
                  use_moe: bool = False,
                  num_experts_per_tok: int = 2,
                  n_routed_experts: int = 4,
-                 n_shared_experts: bool = True,
+                 n_shared_experts: int = 1,
                  scoring_func: str = "softmax",
                  aux_loss_alpha: float = 0.01,
                  seq_aux: bool = True,

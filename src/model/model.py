@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch
 from typing import Optional, Tuple, List, Union
 import torch.nn.functional as F
+import torch.nn.init as init
 import math
 from src.model.config import MiniLLMConfig
 import numpy as np
@@ -315,16 +316,216 @@ class FeedForward(nn.Module):
 
     def forward(self, x: torch.Tensor):
         return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
+    
 
-
-class MOEFeedForward(nn.Module):
+class MoEGate(nn.Module):
     """
-    TODO: 需要实现MOEFeedForward
+    实现MoEGate
     """
-
     def __init__(self, config: MiniLLMConfig):
         super().__init__()
-        pass
+        # 初始化 门控网络 的基本参数
+        self.config = config
+        self.top_k = config.num_experts_per_tok # 每个token的专家数
+        self.n_routed_experts = config.n_routed_experts # 路由专家数
+        # 评分函数和辅助损失相关参数
+        self.scoring_func = config.scoring_func # 评分函数，默认使用softmax
+        self.alpha  = config.aux_loss_alpha # 辅助损失系数
+        self.seq_aux  = config.seq_aux # 序列辅助
+        # 概率归一化相关参数
+        self.norm_topk_prob = config.norm_topk_prob # 是否归一化topk概率
+        self.gating_dim = config.hidden_size # 门控维度
+        # 初始化门控网络的权重参数
+        self.weight = nn.Parameter(
+            torch.empty(
+                (self.n_routed_experts, self.gating_dim)
+            )
+        )
+        # 权重初始化
+        self.reset_parameters()
+    
+    def reset_parameters(self) -> None:
+        # 初始化门控权重，使用kaiming均匀初始化
+        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+
+    def forward(self,hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        前向传播
+        """
+        bsz,seq_len,dim = hidden_states.shape # 获取batch大小、序列长度和隐藏维度
+        # 展平隐藏状态，方便后续处理
+        hidden_states = hidden_states.view(-1, dim)  # hidden_states 展平为 (bsz * seq_len, dim)
+        # 计算每个token与每个专家的匹配分数
+        logits = F.linear(hidden_states, self.weight, bias=None)  # logits 形状为 (bsz * seq_len, n_routed_experts)
+        # 使用softmax评分函数将分数转换为概率分布
+        if self.scoring_func == "softmax": # 使用softmax评分函数
+            scores = F.softmax(logits,dim=-1)  # scores 形状为 (bsz * seq_len, n_routed_experts)
+        # elif self.scoring_func == "sigmoid": # 使用sigmoid评分函数
+        #     scores = torch.sigmoid(logits)
+        else:
+            raise NotImplementedError(f"Unsupported scoring function: {self.scoring_func}")
+        # 选择 top-k个专家以及对应的权重
+        topk_weight,topk_idx = torch.topk(scores,k=self.top_k,dim=-1,sorted=False)
+        topk_weight # shape: (bsz * seq_len, top_k)
+        topk_idx # shape: (bsz * seq_len, top_k)
+        
+        if self.top_k > 1 and self.alpha > 0.0:
+            # 计算topk权重和
+            denominator = topk_weight.sum(dim=-1,keepdim=True)
+            # 归一化topk权重， 防止出现0，所以加分母上添加一个极小值 1e-20
+            topk_weight = topk_weight / denominator  + 1e-20
+        if self.training and self.alpha > 0.0: # 训练时使用辅助损失
+            # 计算辅助损失
+            scores_for_aux = scores.clone()
+            aux_topk = self.top_k
+            # 获取topk索引
+            topk_idx_for_aux_loss = topk_idx.view(bsz, -1)
+            if self.seq_aux: # 如果使用序列辅助
+                # 序列级别的辅助损失计算
+                scores_for_seq_aux = scores_for_aux.view(bsz, seq_len, -1)
+                ce = torch.zeros(bsz,self.n_routed_experts,device=hidden_states.device)
+                # 计算每个专家的使用频率
+                ce.scatter_add_(1, 
+                                topk_idx_for_aux_loss,
+                                torch.ones(bsz,seq_len * aux_topk,
+                                device=hidden_states.device)).div(
+                                    seq_len * aux_topk / self.n_routed_experts
+                                )
+                # 计算最终的辅助损失
+                aux_loss = (ce * scores_for_seq_aux.mean(dim=1)).sum(dim=-1).mean() * self.alpha
+            else: # 如果使用token级别的辅助损失
+                mask_ce = F.one_hot(
+                    topk_idx_for_aux_loss.view(-1),
+                    num_classes=self.n_routed_experts
+                )
+                # 计算每个专家的平均使用频率，ce为每个专家的平均使用频率
+                ce = mask_ce.float().mean(dim=0) # shape: (n_routed_experts,)
+                # Pi为每个token的专家使用概率
+                Pi = scores_for_aux.mean(dim=0) # shape: (bsz * seq_len, n_routed_experts)
+                # fi为每个专家的期望使用频率
+                fi = ce * self.n_routed_experts # shape: (n_routed_experts,)
+                # 计算最终的辅助损失
+                aux_loss = (Pi * fi).sum() * self.alpha
+        else:
+            aux_loss = 0.0
+        # 返回门控网络的输出和辅助损失
+        return topk_idx, topk_weight, aux_loss
+        
+    
+class MOEFeedForward(nn.Module):
+    """
+    实现MOEFeedForward
+    """
+    def __init__(self, config: MiniLLMConfig):
+        super().__init__()
+        self.config = config
+        # 初始化 路由专家网络
+        self.experts = nn.ModuleList([
+            FeedForward(config)
+            for _ in range(config.n_routed_experts)
+        ])
+        # 初始化 门控网络
+        self.gate = MoEGate(config)
+        # 初始化 共享专家网络
+        if config.n_shared_experts > 0:
+            self.shared_experts = nn.ModuleList([
+                FeedForward(config)
+                for _ in range(config.n_shared_experts)
+            ])
+        else:
+            self.shared_experts = None
+        
+    def forward(self,x: torch.Tensor) -> torch.Tensor:
+        """
+        前向传播
+        """
+        identity = x # 保存原始输入
+        orig_shape = x.shape
+        bsz, seq_len, _ = x.shape
+        
+        # 使用门控网络选择专家
+        topk_idx, topk_weight, aux_loss = self.gate(x)
+        # topk_idx # shape: (bsz * seq_len, top_k)
+        # topk_weight # shape: (bsz * seq_len, top_k)
+        # aux_loss # shape: (1,)
+
+        # 将输入展平
+        x = x.view(-1,x.shape[-1]) # shape: (bsz * seq_len, dim)
+        flat_topk_idx = topk_idx.view(-1) # shape: (bsz * seq_len * top_k,)
+
+        if self.training: # 如果是在训练模式下
+            # 重复输入x，使其与topk_idx的形状相同
+            x = x.repeat_interleave(self.config.num_experts_per_tok,dim=0) 
+            # 创建一个与x形状相同的张量，用于存储专家输出
+            y = torch.empty_like(x, dtype=torch.float16)
+            # 遍历每个专家
+            for i,expert in enumerate(self.experts):
+                # 将专家的输出存储到y中
+                y[flat_topk_idx == i] = expert(x[flat_topk_idx == i]).to(y.dtype)
+            # 加权求和得到最终输出
+            y = (y.view(*topk_weight.shape,-1) * topk_weight.unsqueeze(-1)).sum(dim=1)
+            y = y.view(*orig_shape)
+        else: # 如果是在推理模式下
+            # 使用moe_infer函数计算输出，并展平
+            y = self.moe_infer(x,
+                               flat_topk_idx,
+                               topk_weight.unsqueeze(-1,1)
+                               ).view(*orig_shape)
+        # 如果存在共享专家，则将共享专家的输出与路由专家的输出相加
+        if self.config.n_shared_experts > 0:
+            for expert in self.shared_experts:
+                y = y + expert(identity)
+        
+        self.aux_loss = aux_loss
+        return y
+        
+    @torch.no_grad() # 推理时不需要计算梯度
+    def moe_infer(self,x , flat_expert_indices, flat_expert_weights):
+        """
+        Args:
+            x: 输入张量，形状为 (bsz, seq_len, dim)
+            flat_expert_indices: 展平的专家索引，形状为 (bsz * seq_len,)
+            flat_expert_weights: 展平的专家权重，形状为 (bsz * seq_len,)
+        """
+        # 推理时的优化实现
+        expert_cache = torch.zeros_like(x)
+        # 对专家索引进行排序，便于批量处理
+        idxs = flat_expert_indices.argsort() # 返回排序后的索引
+        # 计算每个专家处理的token数量
+        # bincount 计算每个元素出现的次数
+        tokens_pre_expert = flat_expert_indices.bincount()
+        # 将tokens_pre_expert转换为numpy数组
+        tokens_pre_expert = tokens_pre_expert.cpu().numpy()
+        # cumsum 函数计算累加和，cumsum(0)表示按行累加
+        tokens_pre_expert = tokens_pre_expert.cumsum(0)
+        # 计算每个token的原始索引
+        token_idxs = idxs // self.config.num_experts_per_tok
+
+
+        # 对每个专家批量处理其负责的token
+        for i,end_idx in enumerate(tokens_pre_expert):
+            # 获取当前专家处理的token范围
+            start_idx = 0 if i==0 else tokens_pre_expert[i-1]
+            if start_idx == end_idx:
+                continue
+            # 取出当前专家
+            expert = self.experts[i]
+            # 取出当前专家处理的token
+            exp_token_idx = token_idxs[start_idx:end_idx]
+            expert_tokens = x[exp_token_idx]
+            # 计算专家输出并应用权重
+            expert_out = expert(expert_tokens).to(expert_cache.dtype)
+            # expert_out mul_ 将专家输出与权重相乘
+            expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])     
+            # 将结果累加到缓存中 
+            # exp_token_idx.view(-1,1).repeat(1,x.shape[1]) 将exp_token_idx扩展为(bsz * seq_len,1)
+            # 然后使用scatter_add_将expert_out加到expert_cache中，scatter_add_的第一个参数是dim=0，表示按行累加
+            expert_cache.scatter_add_(0, 
+                                        exp_token_idx.view(-1,1).repeat(1,x.shape[1]),
+                                        expert_out
+                                        )
+        return expert_cache
+        
 
 
 class MiniLLMBlock(nn.Module):
