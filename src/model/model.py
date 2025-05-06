@@ -469,7 +469,7 @@ class MOEFeedForward(nn.Module):
             # 使用moe_infer函数计算输出，并展平
             y = self.moe_infer(x,
                                flat_topk_idx,
-                               topk_weight.unsqueeze(-1,1)
+                               topk_weight.view(-1,1)
                                ).view(*orig_shape)
         # 如果存在共享专家，则将共享专家的输出与路由专家的输出相加
         if self.config.n_shared_experts > 0:

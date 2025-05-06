@@ -107,7 +107,14 @@ def main():
 
     default_data_path = os.path.join(this_dir, "./assets/data_sample/wikipedia_zh_sample_data.json")
     # model_output_dir = os.path.join(this_dir,"./minillm_output")
-    model_output_dir = os.path.join(this_dir,"./assets/minillm_output/sft")
+    use_moe = True
+    sft = False
+    model_output_dir = os.path.join(this_dir,"./assets/minillm_output/")
+    if use_moe:
+        model_output_dir = os.path.join(model_output_dir,"moe")
+    if sft:
+        model_output_dir = os.path.join(model_output_dir,"sft")
+    
 
     model_dir = os.path.join(model_output_dir,"dim_512/n_layers_8")
     # model_dir = model_output_dir
@@ -127,7 +134,7 @@ def main():
     parser.add_argument("--dim", type=int, default=512, help="The dimension of the model")
     parser.add_argument("--n_layers", type=int, default=8, help="The number of layers of the model")
     parser.add_argument("--max_seq_len", type=int, default=8192, help="The max sequence length of the model")
-    parser.add_argument("--use_moe", type=bool, default=False, help="Whether to use moe")
+    parser.add_argument("--use_moe", type=bool, default=use_moe, help="Whether to use moe")
 
     # 携带历史对话上下文条数
     # history_cnt需要设为偶数，即【用户问题, 模型回答】为1组；设置为0时，即当前query不携带历史上文
@@ -135,7 +142,7 @@ def main():
     parser.add_argument("--history_cnt", type=int, default=0, help="The number of history context")
     parser.add_argument("--stream", type=bool, default=True, help="Whether to stream")
     parser.add_argument('--load', default=0, type=int, help="0: 原生torch权重，1: transformers加载")
-    parser.add_argument('--model_mode', default=1, type=int,
+    parser.add_argument('--model_mode', default=0, type=int,
                         help="0: 预训练模型，1: SFT-Chat模型，2: RLHF-Chat模型，3: Reason模型，4: RLAIF-Chat模型")
 
     args = parser.parse_args()
