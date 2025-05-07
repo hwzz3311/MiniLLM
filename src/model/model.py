@@ -352,9 +352,9 @@ class MoEGate(nn.Module):
         """
         前向传播
         """
-        bsz,seq_len,dim = hidden_states.shape # 获取batch大小、序列长度和隐藏维度
+        bsz,seq_len,dim = hidden_states.shape # 获取batch大小、序列长度和隐藏维度 example: bsz: 32, seq_len: 511, dim: 512
         # 展平隐藏状态，方便后续处理
-        hidden_states = hidden_states.view(-1, dim)  # hidden_states 展平为 (bsz * seq_len, dim)
+        hidden_states = hidden_states.view(-1, dim)  # hidden_states 展平为 (bsz * seq_len, dim) example: (32 * 511, 512)
         # 计算每个token与每个专家的匹配分数
         logits = F.linear(hidden_states, self.weight, bias=None)  # logits 形状为 (bsz * seq_len, n_routed_experts)
         # 使用softmax评分函数将分数转换为概率分布
@@ -368,22 +368,22 @@ class MoEGate(nn.Module):
         topk_weight,topk_idx = torch.topk(scores,k=self.top_k,dim=-1,sorted=False)
         topk_weight # shape: (bsz * seq_len, top_k)
         topk_idx # shape: (bsz * seq_len, top_k)
-        
+        # 为什么topk_weight 和topk_idx 的shape是一样的？
         if self.top_k > 1 and self.alpha > 0.0:
             # 计算topk权重和
             denominator = topk_weight.sum(dim=-1,keepdim=True)
-            # 归一化topk权重， 防止出现0，所以加分母上添加一个极小值 1e-20
+            # 归一化topk权重， 防止出现0，所以加分母上添加一个极小值 1e-20；提问这里为什么要归一化？
             topk_weight = topk_weight / denominator  + 1e-20
         if self.training and self.alpha > 0.0: # 训练时使用辅助损失
             # 计算辅助损失
             scores_for_aux = scores.clone()
             aux_topk = self.top_k
             # 获取topk索引
-            topk_idx_for_aux_loss = topk_idx.view(bsz, -1)
+            topk_idx_for_aux_loss = topk_idx.view(bsz, -1) # shape: (bsz, seq_len * top_k) example: (32, 511 * 2)
             if self.seq_aux: # 如果使用序列辅助
                 # 序列级别的辅助损失计算
-                scores_for_seq_aux = scores_for_aux.view(bsz, seq_len, -1)
-                ce = torch.zeros(bsz,self.n_routed_experts,device=hidden_states.device)
+                scores_for_seq_aux = scores_for_aux.view(bsz, seq_len, -1) # shape: (bsz, seq_len, n_routed_experts) example: (32, 511, 4)
+                ce = torch.zeros(bsz, self.n_routed_experts, device=hidden_states.device) #
                 # 计算每个专家的使用频率
                 ce.scatter_add_(1, 
                                 topk_idx_for_aux_loss,
@@ -440,8 +440,8 @@ class MOEFeedForward(nn.Module):
         前向传播
         """
         identity = x # 保存原始输入
-        orig_shape = x.shape
-        bsz, seq_len, _ = x.shape
+        orig_shape = x.shape # shape: (bsz, seq_len, dim) example: (32, 511, 512)
+        bsz, seq_len, _ = x.shape # example: bsz: 32, seq_len: 511, dim: 512
         
         # 使用门控网络选择专家
         topk_idx, topk_weight, aux_loss = self.gate(x)

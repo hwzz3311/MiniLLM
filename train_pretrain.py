@@ -231,8 +231,8 @@ if __name__ == "__main__":
     minimind_tokenizer_path = os.path.join(this_dir,"./assets/minimind_tokenizer")
     tokenizer_path = minillm_tokenizer_path
     # default_data_path = os.path.join(this_dir,"data_sample/baidubaike_wikipedia_sample_data.parquet")
-    default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet" # 更换为minimind数据集测试效果
-    # default_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_512max.parquet" # 1.2G
+    # default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet" # 更换为minimind数据集测试效果
+    default_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_512max.parquet" # 1.2G
     out_dir = os.path.join(this_dir,"./assets/minillm_output/moe")
     use_moe = True
     model_dir = os.path.join(out_dir,"dim_512/n_layers_8/")
@@ -249,7 +249,7 @@ if __name__ == "__main__":
     parser.add_argument("--out_dir",type=str,default=out_dir,help="The output directory")
     parser.add_argument("--epochs",type=int,default=2)
     parser.add_argument("--batch_size",type=int,default=32)
-    parser.add_argument("--learning_rate",type=float,default=5e-4)
+    parser.add_argument("--learning_rate",type=float,default=9e-4)
     parser.add_argument("--checkpoint_path",default=model_check_point_path)
     parser.add_argument("--device",type=str,default=device)
     parser.add_argument("--dtype",type=str,default=dtype)
