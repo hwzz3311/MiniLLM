@@ -320,7 +320,7 @@ class FeedForward(nn.Module):
 
 class MoEGate(nn.Module):
     """
-    实现MoEGate
+    实现MoEGate 门控网络 既选择专家，又计算辅助损失
     """
     def __init__(self, config: MiniLLMConfig):
         super().__init__()
@@ -341,6 +341,7 @@ class MoEGate(nn.Module):
                 (self.n_routed_experts, self.gating_dim)
             )
         )
+        # self.weight: 形状为 (n_routed_experts, dim)，表示每个专家的权重矩阵；可以看作是该专家的"专长"或"偏好"；
         # 权重初始化
         self.reset_parameters()
     
@@ -353,17 +354,31 @@ class MoEGate(nn.Module):
         前向传播
         """
         bsz,seq_len,dim = hidden_states.shape # 获取batch大小、序列长度和隐藏维度 example: bsz: 32, seq_len: 511, dim: 512
-        # 展平隐藏状态，方便后续处理
+        # 展平隐藏状态，方便后续处理 hidden_states 代表对所有输入token的隐藏状态
         hidden_states = hidden_states.view(-1, dim)  # hidden_states 展平为 (bsz * seq_len, dim) example: (32 * 511, 512)
-        # 计算每个token与每个专家的匹配分数
+        # 计算每个token与每个专家的匹配分数；通过计算输入token的隐藏状态与专家权重的点积，得到匹配分数；分数越高，表示该token与该专家的匹配度越高
         logits = F.linear(hidden_states, self.weight, bias=None)  # logits 形状为 (bsz * seq_len, n_routed_experts)
-        # 使用softmax评分函数将分数转换为概率分布
+        # 使用softmax评分函数将分数转换为概率分布；通过合理的评分函数，可以使得每个token的专家选择更加合理；
         if self.scoring_func == "softmax": # 使用softmax评分函数
             scores = F.softmax(logits,dim=-1)  # scores 形状为 (bsz * seq_len, n_routed_experts)
-        # elif self.scoring_func == "sigmoid": # 使用sigmoid评分函数
-        #     scores = torch.sigmoid(logits)
+            # 提问：这么做的目的实际意义是什么？
+            # - 通过softmax将匹配分数转换为概率分布
+            # 这样可以得到每个token分配给各个专家的概率
+            # 概率越高的专家，越适合处理该token
+            # 实际意义：
+            # 这种机制允许模型动态地为每个token选择最合适的专家
+            # 不同的专家可以专注于处理不同类型的token
+            # 通过softmax确保每个token的专家分配概率之和为1
+            # 最终选择top-k个专家来处理每个token
         else:
             raise NotImplementedError(f"Unsupported scoring function: {self.scoring_func}")
+        # 提问：为什么针对每个token，都需要选择top-k个专家？而不是针对整个句子选择top-k个专家？会不会丢失整理语义的理解？
+        # 答：1、为每个token选择top-k个专家，可以使得每个token的专家选择更加合理，灵活性更高；
+        # 2、 特别是在处理长文本或复杂语义时，token级别的细粒度控制更有优势
+        # 3、 针对全局信息丢失的风险，使用了shared_experts（共享专家）来处理全局信息
+        # 4、# 通过辅助损失鼓励专家选择的连续性 aux_loss = (ce * scores_for_seq_aux.mean(dim=1)).sum(dim=-1).mean() * self.alpha
+        # 5、 通过这种方式，模型可以更好地捕捉到token级别的语义特征，同时保持对整体语义的理解
+
         # 选择 top-k个专家以及对应的权重
         topk_weight,topk_idx = torch.topk(scores,k=self.top_k,dim=-1,sorted=False)
         topk_weight # shape: (bsz * seq_len, top_k)
@@ -372,19 +387,30 @@ class MoEGate(nn.Module):
         if self.top_k > 1 and self.alpha > 0.0:
             # 计算topk权重和
             denominator = topk_weight.sum(dim=-1,keepdim=True)
-            # 归一化topk权重， 防止出现0，所以加分母上添加一个极小值 1e-20；提问这里为什么要归一化？
+            # 归一化topk权重， 防止出现0，所以加分母上添加一个极小值 1e-20；
             topk_weight = topk_weight / denominator  + 1e-20
+            # 提问这里为什么要归一化？
+            #  答：归一化后的权重可以解释为每个专家被选择的概率；
+            # 确保每个token的top-k个专家的权重之和为1；
+            # 防止权重为0导致的计算问题
         if self.training and self.alpha > 0.0: # 训练时使用辅助损失
+            # 提问 什么是辅助损失？有何作用？
+            # 答：辅助损失是为了鼓励专家选择的连续性，防止专家选择过于随机；
+            # 鼓励专家选择的连续性和一致性；
+            # 防止专家选择过于随机或分散；
+            # 保持序列处理的连贯性；
+
             # 计算辅助损失
-            scores_for_aux = scores.clone()
+            scores_for_aux = scores.clone() # scores_for_aux 为 输入token 隐藏状态和专家权重 的结果；分值越大，表示该token与该专家的匹配度越高
             aux_topk = self.top_k
-            # 获取topk索引
+            # 获取topk索引，既：每个token的topk个专家索引
             topk_idx_for_aux_loss = topk_idx.view(bsz, -1) # shape: (bsz, seq_len * top_k) example: (32, 511 * 2)
             if self.seq_aux: # 如果使用序列辅助
                 # 序列级别的辅助损失计算
                 scores_for_seq_aux = scores_for_aux.view(bsz, seq_len, -1) # shape: (bsz, seq_len, n_routed_experts) example: (32, 511, 4)
-                ce = torch.zeros(bsz, self.n_routed_experts, device=hidden_states.device) #
-                # 计算每个专家的使用频率
+                # ce: 表示每个专家在整个序列中的使用频率，首先初始化一个形状为 (bsz, n_routed_experts) 的零张量
+                ce = torch.zeros(bsz, self.n_routed_experts, device=hidden_states.device) # shape: (bsz, n_routed_experts) example: (32, 4)
+                # 计算每个专家的使用频率，通过scatter_add_计算每个专家被选择的次数
                 ce.scatter_add_(1, 
                                 topk_idx_for_aux_loss,
                                 torch.ones(bsz,seq_len * aux_topk,
@@ -392,20 +418,104 @@ class MoEGate(nn.Module):
                                     seq_len * aux_topk / self.n_routed_experts
                                 )
                 # 计算最终的辅助损失
-                aux_loss = (ce * scores_for_seq_aux.mean(dim=1)).sum(dim=-1).mean() * self.alpha
+                # scores_for_seq_aux.mean(dim=1) 表示对每个token的专家选择概率取平均值，既每个专家 对batch中的每个token 的贡献度（影响力）的平均值；
+                # ce * scores_for_seq_aux.mean(dim=1) 表示将每个专家的贡献度（影响力）乘以每个token的专家选择概率
+                # .sum(dim=-1) 对每个batch的专家维度求和
+                # .mean() 对所有batch取平均
+                aux_loss = (
+                            ce * scores_for_seq_aux.mean(dim=1)
+                            ).sum(
+                                dim=-1
+                                ).mean() * self.alpha
+                # 提问 为什么设置self.alpha？
+                # 答：self.alpha 是一个超参数，用于控制辅助损失的权重；
+                # 平衡主损失和辅助损失
+                # 防止辅助损失过大影响主任务 ⭐️
+                # 调整专家选择的连续性程度
             else: # 如果使用token级别的辅助损失
+                # 创建一个one-hot编码的掩码，用于表示每个token的专家选择
                 mask_ce = F.one_hot(
                     topk_idx_for_aux_loss.view(-1),
                     num_classes=self.n_routed_experts
                 )
+                # mask_ce example :
+                # [[1,0,0,0],  # token 1 选择专家0，len([1,0,0,0]) = self.n_routed_experts
+                # ......
+                #  [0,0,0,1],  # token 6 选择专家3
+                #  [1,0,0,0],  # batch 2的token 1
+                # ......
+                #  [0,1,0,0]]  # batch 2的token 6
                 # 计算每个专家的平均使用频率，ce为每个专家的平均使用频率
                 ce = mask_ce.float().mean(dim=0) # shape: (n_routed_experts,)
-                # Pi为每个token的专家使用概率
+                # ce example:
+                # 结果：[0.25, 0.25, 0.17, 0.17]
+                # 表示：
+                # 专家0被选择25%的时间
+                # 专家1被选择25%的时间
+                # 专家2被选择17%的时间
+                # 专家3被选择17%的时间
+
+                # Pi为每个token的专家平均使用概率；scores_for_aux 为每个token的专家选择概率（归一化后的结果）
                 Pi = scores_for_aux.mean(dim=0) # shape: (bsz * seq_len, n_routed_experts)
-                # fi为每个专家的期望使用频率
+                # Pi example:
+                # 结果：[0.3, 0.4, 0.2, 0.1]
+                # 表示：
+                # 平均来说，选择专家0的概率是30%
+                # 选择专家1的概率是40%
+                # 选择专家2的概率是20%
+                # 选择专家3的概率是10%
+                
+                # ce: 每个专家的实际使用频率；num_experts: 专家总数；fi为每个专家的期望使用频率
                 fi = ce * self.n_routed_experts # shape: (n_routed_experts,)
+                """
+                提问：为什么要乘以 num_experts？
+                    a) 归一化到专家数量：
+                    将每个专家的期望使用频率归一化到专家数量，使得每个专家的期望使用频率之和为1；
+                    这样每个专家的期望使用频率可以更好地反映其在整个序列中的使用情况；
+                    a) 归一化效果：
+                        乘以num_experts使得期望使用频率更容易理解
+                        fi = 1.0 表示该专家被使用1次
+                        fi = 2.0 表示该专家被使用2次
+                        fi = 0.5 表示该专家被使用0.5次
+                3. 数学解释：
+                ```language=python
+                # 假设有n个专家
+                # 每个专家被选择的概率是p_i
+                # 那么期望使用频率应该是：
+                # fi = p_i * n
+
+                # 例如：
+                n = 4  # 4个专家
+                ce = [0.25, 0.25, 0.25, 0.25]  # 使用频率
+                fi = [0.25*4, 0.25*4, 0.25*4, 0.25*4]  # 期望使用次数
+                ```
+                6. 实际应用：
+
+                ```language=python
+                # 在辅助损失计算中：
+                aux_loss = (Pi * fi).sum() * self.alpha
+
+                # 当专家使用均衡时：
+                Pi = [0.25, 0.25, 0.25, 0.25]
+                fi = [1.0, 1.0, 1.0, 1.0]
+                aux_loss = 1.0 * self.alpha  # 损失较小
+
+                # 当专家使用不均衡时：
+                Pi = [0.3, 0.3, 0.2, 0.2]
+                fi = [2.0, 1.2, 0.4, 0.4]
+                aux_loss = 1.2 * self.alpha  # 损失较大
+                ```
+                """
                 # 计算最终的辅助损失
                 aux_loss = (Pi * fi).sum() * self.alpha
+            # ====================================
+            """
+            整体理解下上面这段 辅助损失的代码:
+            通过计算专家使用频率和选择概率的匹配程度来控制最终的损失
+                当两者分布相似时，损失较小
+                当两者分布差异大时，损失较大
+            通过 self.alpha 控制这个损失的影响程度
+            """
         else:
             aux_loss = 0.0
         # 返回门控网络的输出和辅助损失
@@ -415,6 +525,28 @@ class MoEGate(nn.Module):
 class MOEFeedForward(nn.Module):
     """
     实现MOEFeedForward
+    为什么需要路由专家 和门控网络？：
+    a) 职责分离：
+        1. 门控网络 (self.gate)
+            - 负责"选择"专家
+            - 计算每个token应该使用哪些专家
+            - 计算每个专家的权重
+        2. 专家网络 (self.experts)
+            - 负责"处理"数据
+            - 实际执行计算
+            - 产生输出
+    b) 灵活性：
+        1. 可以独立更新专家
+        - 专家可以专注于学习特定任务
+        - 不影响选择机制
+
+        2. 可以独立更新门控
+        - 门控可以专注于学习选择策略
+        - 不影响专家能力
+    1. 专家可以专注于特定任务
+    2. 门控可以学习最佳选择策略
+    3. 提高模型性能
+    ps：这也代表 moe模型更加难以训练。。。
     """
     def __init__(self, config: MiniLLMConfig):
         super().__init__()
@@ -424,8 +556,11 @@ class MOEFeedForward(nn.Module):
             FeedForward(config)
             for _ in range(config.n_routed_experts)
         ])
-        # 初始化 门控网络
-        self.gate = MoEGate(config)
+        # 初始化 门控网络  包含：
+                # - 一个线性层
+                # - 用于计算专家选择概率
+        self.gate = MoEGate(config) # 用于选择专家的网络
+
         # 初始化 共享专家网络
         if config.n_shared_experts > 0:
             self.shared_experts = nn.ModuleList([
@@ -434,6 +569,7 @@ class MOEFeedForward(nn.Module):
             ])
         else:
             self.shared_experts = None
+            
         
     def forward(self,x: torch.Tensor) -> torch.Tensor:
         """
@@ -445,25 +581,35 @@ class MOEFeedForward(nn.Module):
         
         # 使用门控网络选择专家
         topk_idx, topk_weight, aux_loss = self.gate(x)
-        # topk_idx # shape: (bsz * seq_len, top_k)
-        # topk_weight # shape: (bsz * seq_len, top_k)
-        # aux_loss # shape: (1,)
+        # topk_idx # shape: (bsz * seq_len, top_k) 为每个token选择topk个专家的索引
+        # topk_weight # shape: (bsz * seq_len, top_k) 为每个token选择topk个专家的权重
+        # aux_loss # shape: (1,) aux_loss 为模型训练时的辅助损失主要用于控制专家选择的一致性
 
         # 将输入展平
         x = x.view(-1,x.shape[-1]) # shape: (bsz * seq_len, dim)
-        flat_topk_idx = topk_idx.view(-1) # shape: (bsz * seq_len * top_k,)
+        flat_topk_idx = topk_idx.view(-1) # shape: (bsz * seq_len * top_k,) 展平后的专家索引
 
         if self.training: # 如果是在训练模式下
-            # 重复输入x，使其与topk_idx的形状相同
-            x = x.repeat_interleave(self.config.num_experts_per_tok,dim=0) 
+            """
+            以下代码：为每个token创建多个副本
+                让每个专家处理选择它的token
+                将多个专家的输出加权合并
+                保持计算效率和内存使用
+            """
+            # 重复输入x，使其与topk_idx的形状相同, 重复次数为每个token选择topk个专家的次数，简单理解，将token复制topk个，每个token对应一个专家
+            x = x.repeat_interleave(self.config.num_experts_per_tok, dim=0) 
             # 创建一个与x形状相同的张量，用于存储专家输出
             y = torch.empty_like(x, dtype=torch.float16)
             # 遍历每个专家
             for i,expert in enumerate(self.experts):
+                # 让每个专家处理选择它的token
                 # 将专家的输出存储到y中
+                # 这里使用flat_topk_idx == i 来选择每个专家的token
+                # 因为flat_topk_idx 是展平后的专家索引，所以需要使用 == i 来选择每个专家的token
                 y[flat_topk_idx == i] = expert(x[flat_topk_idx == i]).to(y.dtype)
-            # 加权求和得到最终输出
+            # 将每个专家处理的结果和 对应的专家权重相乘，然后求和得到最终输出
             y = (y.view(*topk_weight.shape,-1) * topk_weight.unsqueeze(-1)).sum(dim=1)
+            # 将y展平为原始形状
             y = y.view(*orig_shape)
         else: # 如果是在推理模式下
             # 使用moe_infer函数计算输出，并展平
