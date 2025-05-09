@@ -613,6 +613,8 @@ class MOEFeedForward(nn.Module):
             y = y.view(*orig_shape)
         else: # 如果是在推理模式下
             # 使用moe_infer函数计算输出，并展平
+            # flat_topk_idx shape: (bsz * seq_len * top_k,)
+            # topk_weight.view(-1,1) shape: (bsz * seq_len * top_k, 1)
             y = self.moe_infer(x,
                                flat_topk_idx,
                                topk_weight.view(-1,1)
@@ -630,22 +632,40 @@ class MOEFeedForward(nn.Module):
         """
         Args:
             x: 输入张量，形状为 (bsz, seq_len, dim)
-            flat_expert_indices: 展平的专家索引，形状为 (bsz * seq_len,)
-            flat_expert_weights: 展平的专家权重，形状为 (bsz * seq_len,)
+            flat_expert_indices: 展平的专家索引，形状为 (bsz * seq_len * top_k,)
+            flat_expert_weights: 展平的专家权重，形状为 (bsz * seq_len * top_k, 1)
         """
-        # 推理时的优化实现
+        # 创建一个与输入x形状相同的零张量，用于存储专家输出
         expert_cache = torch.zeros_like(x)
         # 对专家索引进行排序，便于批量处理
         idxs = flat_expert_indices.argsort() # 返回排序后的索引
+        # idxs 中存储的是 每个专家处理的token的索引
+        """
+        # 例如：
+        # flat_expert_indices = [2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1]
+        # idxs = [1, 4, 7, 10, 2, 5, 8, 11, 0, 3, 6, 9]
+        # 表示：    
+        # 专家0处理token1, 4, 7, 10
+        # 专家1处理token2, 5, 8, 11
+        # 专家2处理token0, 3, 6, 9
+        也就是说，经过这一步，每个专家处理的token的索引已经排序好了
+        """
         # 计算每个专家处理的token数量
-        # bincount 计算每个元素出现的次数
-        tokens_pre_expert = flat_expert_indices.bincount()
+        # bincount 计算每个元素出现的次数，既每个专家处理的token数量
+        tokens_pre_expert = flat_expert_indices.bincount() # example: [2, 3, 2]  # 专家0处理2个token，专家1处理3个token，专家2处理2个token
         # 将tokens_pre_expert转换为numpy数组
         tokens_pre_expert = tokens_pre_expert.cpu().numpy()
+        
         # cumsum 函数计算累加和，cumsum(0)表示按行累加
-        tokens_pre_expert = tokens_pre_expert.cumsum(0)
+        tokens_pre_expert = tokens_pre_expert.cumsum(0) 
+        # example: [2, 5, 7]  # 专家0处理2个token，专家1处理5个token，专家2处理7个token
+        # 同时也代码 0-2 是专家0处理的token，2-5 是专家1处理的token，5-7 是专家2处理的token
+
         # 计算每个token的原始索引
         token_idxs = idxs // self.config.num_experts_per_tok
+        # 因为 idxs中存储的是 是token对应的专家索引，每个token对应 num_experts_per_tok 个专家，也可以理解为 第一个token到第二个token 中间差了 num_experts_per_tok 个专家，因此需要除以 num_experts_per_tok 来获取token的原始索引
+        # 如：假设num_experts_per_tok =2
+        # # token_idxs = [0, 2, 3, 5, 1, 2, 4, 5, 0, 1, 3, 4]
 
 
         # 对每个专家批量处理其负责的token
@@ -654,6 +674,7 @@ class MOEFeedForward(nn.Module):
             start_idx = 0 if i==0 else tokens_pre_expert[i-1]
             if start_idx == end_idx:
                 continue
+            # start_idx和end_idx 是当前专家 i 处理的token范围
             # 取出当前专家
             expert = self.experts[i]
             # 取出当前专家处理的token
