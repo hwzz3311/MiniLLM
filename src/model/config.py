@@ -52,6 +52,11 @@ class MiniLLMConfig(PretrainedConfig):
 
 
 
+class MiniLLM_VLConfig(MiniLLMConfig):
+    def __init__(self,**kwargs):
+        super().__init__(**kwargs)
+        pass
+
 
 if __name__ == "__main__":
     # 先看下 Qwen/Qwen2.5-0.5B的config
