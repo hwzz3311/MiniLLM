@@ -1,4 +1,5 @@
 from transformers import PretrainedConfig, Qwen2Config
+from typing import List
 
 
 class MiniLLMConfig(PretrainedConfig):
@@ -53,9 +54,16 @@ class MiniLLMConfig(PretrainedConfig):
 
 
 class MiniLLM_VLConfig(MiniLLMConfig):
-    def __init__(self,**kwargs):
+    model_type = "mini_llm_vl"
+
+    def __init__(self,
+                 image_special_token: str='<|image_pad|>' * 196,
+                 image_token_id: List=[12] * 196,
+                 **kwargs
+                ):
+        self.image_special_token = image_special_token
+        self.image_token_id = image_token_id
         super().__init__(**kwargs)
-        pass
 
 
 if __name__ == "__main__":

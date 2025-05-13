@@ -212,11 +212,11 @@ def save_tokenizer_files(tokenizer, output_dir):
 if __name__ == '__main__':
     # pre_train_data_path = os.path.join(current_dir, "./data_sample/baidubaike_sample_data.json")
     # pre_train_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data.parquet"
-    pre_train_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet"
+    # pre_train_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet"
     output_dir = os.path.join(current_dir, "./assets/minillm_tokenizer")
 
     # train_tokenizer(pre_train_data_path, output_dir)
-    eval_tokenizer(output_dir)
+    # eval_tokenizer(output_dir)
     # 计算tokenizer的压缩率等指标
     texts = ["我爱自然语言处理。", "ChatGPT 是一个大型语言模型。"]
     tokenizer = AutoTokenizer.from_pretrained(output_dir)
@@ -226,18 +226,18 @@ if __name__ == '__main__':
     # res = compute_tokenizer_metrics(texts, tokenizer)
     # print(res)
     # 将Qwen2Tokenizer 下载到本地
-    tokenizer_path = os.path.join(current_dir, "./assets/qwen_tokenizer/")
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-    print("qwen2:\n")
-    print(len(tokenizer))
-    print(f"{len(tokenizer.get_vocab())=}")
-    print(f"vocab size : {tokenizer.vocab_size}")
-    minimind_tokenizer_path = os.path.join(current_dir, "./assets/minimind_tokenizer")
-    tokenizer = AutoTokenizer.from_pretrained(minimind_tokenizer_path, trust_remote_code=True)
-    print("minimind:\n")
-    print(len(tokenizer))
-    print(f"{len(tokenizer.get_vocab())=}")
-    print(f"vocab size : {tokenizer.vocab_size}")
+    # tokenizer_path = os.path.join(current_dir, "./assets/qwen_tokenizer/")
+    # tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+    # print("qwen2:\n")
+    # print(len(tokenizer))
+    # print(f"{len(tokenizer.get_vocab())=}")
+    # print(f"vocab size : {tokenizer.vocab_size}")
+    # minimind_tokenizer_path = os.path.join(current_dir, "./assets/minimind_tokenizer")
+    # tokenizer = AutoTokenizer.from_pretrained(minimind_tokenizer_path, trust_remote_code=True)
+    # print("minimind:\n")
+    # print(len(tokenizer))
+    # print(f"{len(tokenizer.get_vocab())=}")
+    # print(f"vocab size : {tokenizer.vocab_size}")
 
     # s = {'text': '<s>鉴别一组中文文章的风格和特点，例如官方、口语、文言等。需要提供样例文章才能准确鉴别不同的风格和特点。</s> <s>好的，现在帮我查一下今天的天气怎么样?今天的天气依据地区而异。请问你需要我帮你查询哪个地区的天气呢？</s> <s>打开闹钟功能，定一个明天早上七点的闹钟。好的，我已经帮您打开闹钟功能，闹钟将在明天早上七点准时响起。</s> <s>为以下场景写一句话描述：一个孤独的老人坐在公园长椅上看着远处。一位孤独的老人坐在公园长椅上凝视远方。</s> <s>非常感谢你的回答。请告诉我，这些数据是关于什么主题的？这些数据是关于不同年龄段的男女人口比例分布的。</s> <s>帮我想一个有趣的标题。这个挺有趣的："如何成为一名成功的魔术师" 调皮的标题往往会吸引读者的注意力。</s> <s>回答一个问题，地球的半径是多少？地球的平均半径约为6371公里，这是地球自赤道到两极的距离的平均值。</s> <s>识别文本中的语气，并将其分类为喜悦、悲伤、惊异等。\n文本："今天是我的生日！"这个文本的语气是喜悦。</s>'}
     # print(s["text"])
