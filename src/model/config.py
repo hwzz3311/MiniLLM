@@ -1,3 +1,5 @@
+import os.path
+
 from transformers import PretrainedConfig, Qwen2Config
 from typing import List
 
@@ -55,15 +57,36 @@ class MiniLLMConfig(PretrainedConfig):
 
 class MiniLLM_VLConfig(MiniLLMConfig):
     model_type = "mini_llm_vl"
+    base_path = os.path.abspath(__file__)
+    this_clip_model_path = os.path.abspath(os.path.join(base_path,"../assets/clip-vit-base-patch16"))
 
     def __init__(self,
+                 clip_model_path: str=this_clip_model_path,
                  image_special_token: str='<|image_pad|>' * 196,
                  image_token_id: List=[12] * 196,
                  **kwargs
                 ):
+        self.clip_model_path = clip_model_path
         self.image_special_token = image_special_token
         self.image_token_id = image_token_id
         super().__init__(**kwargs)
+        # 判断 clip_model_path 是否和 默认的this_clip_model_path 一致，注意两者的类型可能不一样，需要先统一转换一下
+        self.this_clip_model_path_abs = os.path.abspath(self.this_clip_model_path)
+        self.clip_model_path_abs = os.path.abspath(self.clip_model_path)
+        if self.clip_model_path_abs == self.this_clip_model_path_abs and not os.path.exists(self.clip_model_path_abs):
+            
+            output_info = """
+            # 下载clip模型到 ./assets/ 目录下
+            # git clone https://huggingface.co/openai/clip-vit-base-patch16
+            # or
+            # git clone https://www.modelscope.cn/models/openai-mirror/clip-vit-base-patch16
+            """
+            # 将上述的信息已报错的形式输出
+            raise ValueError(f"clip_model_path 路径不存在: {self.clip_model_path} , 请参考以下信息进行下载 : \n{output_info}")
+        
+
+
+
 
 
 if __name__ == "__main__":

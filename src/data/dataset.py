@@ -409,7 +409,16 @@ class SFT_Dataset(Dataset):
         
         return X, Y, loss_mask
 
-
+class PretrainVLDataset(PretrainDataset):
+    def __init__(self,
+                 data_path:str,
+                 tokenizer:AutoTokenizer,
+                 max_len:int=2048,
+                 chunk_size:int=10000,  # 每次处理的样本数
+                 num_workers:int=min(os.cpu_count(), 16),     # token化时的线程数
+                ):
+        super().__init__(data_path,tokenizer,max_len,chunk_size,num_workers)
+        pass
 
 if __name__ == "__main__":
     current_dir = os.path.dirname(os.path.abspath(__file__))

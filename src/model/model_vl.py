@@ -30,11 +30,11 @@ class MiniLLM_VL(MiniLLM):
         config = config or MiniLLM_VLConfig()
         super().__init__(config)
         self.config = config
-        self.vision_encoder,self.processor = self.load_vision_encoder()
+        self.vision_encoder,self.processor = self.load_vision_model(config.clip_model_path)
         self.vision_proj = VisionProj(embed_dim=config.hidden_size)
 
     @staticmethod
-    def load_vision_encoder(model_path):
+    def load_vision_model(model_path):
         # 加载CLIP模型
         clip_model = CLIPModel.from_pretrained(model_path)
         # 加载CLIP模型
