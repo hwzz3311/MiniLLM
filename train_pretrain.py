@@ -295,18 +295,20 @@ if __name__ == "__main__":
     # default_data_path = os.path.join(this_dir,"data_sample/baidubaike_wikipedia_sample_data.parquet")
     # default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet" # 更换为minimind数据集测试效果
     default_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_512max.parquet"  # 1.2G
-    out_dir = os.path.join(this_dir, "./assets/minillm_output/moe")
+    out_dir = os.path.join(this_dir, "./assets/minillm-vl_output/moe")
     use_moe = True
     train_model = "llm-vl"
     model_dir = os.path.join(out_dir, "dim_512/n_layers_8/")
-    model_check_point_path = ""
+    llm_model_check_point_path = ""
+    vl_model_check_point_path = "/mnt/d/linux/LLM/MiniLLM/assets/minillm_output/pretrain/dim_512/n_layers_8/minillm_pretain_v1.0_build20250424.pth"
     if os.path.exists(model_dir):
         # 获取模型目录下所有文件，按照创建时间进行倒序。
         model_files = os.listdir(model_dir)
         model_files.sort(key=lambda x: os.path.getctime(os.path.join(model_dir, x)), reverse=True)
         if len(model_files) > 0:
-            model_check_point_path = os.path.join(model_dir, model_files[0])
-            print(f"使用模型: {model_check_point_path}")
+            vl_model_check_point_path = os.path.join(model_dir, model_files[0])
+            print(f"使用模型: {vl_model_check_point_path}")
+    
 
     parser = argparse.ArgumentParser(description="Train pretrain model")
     parser.add_argument("--out_dir", type=str, default=out_dir, help="The output directory")
@@ -314,8 +316,8 @@ if __name__ == "__main__":
     parser.add_argument("--train_model", type=str, default=train_model)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--learning_rate", type=float, default=9e-4)
-    parser.add_argument("--llm_checkpoint_path", default=model_check_point_path)
-    parser.add_argument("--vl_checkpoint_path", default=None)
+    parser.add_argument("--llm_checkpoint_path", default=llm_model_check_point_path)
+    parser.add_argument("--vl_checkpoint_path", default=vl_model_check_point_path)
     parser.add_argument("--device", type=str, default=device)
     parser.add_argument("--dtype", type=str, default=dtype)
     parser.add_argument("--use_wandb", action="store_true", default=True)
@@ -370,13 +372,25 @@ if __name__ == "__main__":
             model.load_state_dict(torch.load(args.llm_checkpoint_path))
             Log(f"load check_point {args.llm_checkpoint_path} success!")
     elif train_model == "llm-vl":
-        init_vl_model(lm_config, tokenizer_path, args)
+        model, tokenizer, preprocess = init_vl_model(lm_config, tokenizer_path, args)
+        if args.vl_checkpoint_path:
+            model.load_state_dict(torch.load(args.vl_checkpoint_path))
+            Log(f"load check_point {args.vl_checkpoint_path} success!")
     model.to(args.device)
     Log("loading data")
-    train_ds = PretrainDataset(args.data_path,
+    if train_model == "llm":
+        train_ds = PretrainDataset(args.data_path,
                                tokenizer,
                                args.max_seq_len,
                                num_workers=16)
+    elif train_model == "llm-vl":
+        train_ds = PretrainVLDataset(args.data_path,
+                                    tokenizer,
+                                    preprocess,
+                                    args.max_seq_len,
+                                    num_workers=16)
+    else:
+        raise ValueError(f"train_model 参数错误，请检查 train_model 参数")
     train_sampler = DistributedSampler(train_ds) if ddp else None  # 分布式训练的采样器
     train_loader = DataLoader(
         train_ds,

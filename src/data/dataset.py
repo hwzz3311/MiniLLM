@@ -17,7 +17,8 @@ import threading
 import gc
 import queue
 from queue import Queue
-
+from typing import Callable
+from PIL import Image
 
 
 from src.data.data_processing import load_data
@@ -239,10 +240,7 @@ class SFT_Dataset(Dataset):
         self.sft_eos_token_id:list = tokenizer(self.sft_eos_token,add_special_tokens=False).input_ids
 
         # 生成缓存文件路径
-        cache_dir = os.path.dirname(data_path)
-        file_name = os.path.basename(data_path)
-        cache_filename = f"tokenized_sft_{file_name}.parquet"
-        self.cache_path = os.path.join(cache_dir, cache_filename)
+        self.cache_path = self._gen_cache_path(data_path)
         
         # 检查缓存文件是否存在
         if os.path.exists(self.cache_path):
@@ -257,6 +255,12 @@ class SFT_Dataset(Dataset):
         # 计算总长度和样本数
         print("计算总长度和样本数")
         print(f"total_samples: {len(self.all_tokenized_samples)}")
+    def _gen_cache_path(self,data_path:str):
+        cache_dir = os.path.dirname(data_path)
+        file_name = os.path.basename(data_path)
+        cache_filename = f"tokenized_sft_{file_name}.parquet"
+        return os.path.join(cache_dir, cache_filename)
+    
     def _create_chat_prompt(self,conversations):
         """创建chat prompt"""
         messages = []
@@ -279,7 +283,22 @@ class SFT_Dataset(Dataset):
             chunk_input_ids.append(encoding.input_ids)
             # 及时清理不再需要的数据
             del sample, conversations, prompt, encoding
-        return chunk_input_ids
+        # 使用 ListArray 直接存储嵌套列表
+        chunk_input_ids = pa.array(chunk_input_ids, type=pa.list_(pa.int64()))
+
+        return {"input_ids":chunk_input_ids}
+
+    def process_chunk(self, chunk, chunk_idx):
+        try:
+            res = self._tokenize_chunk(chunk)
+            # 立即将结果放入队列
+            self.result_queue.put((chunk_idx, res))
+        except Exception as e:
+            print(f"Error processing chunk {chunk_idx}: {e}")
+        finally:
+            # 确保清理线程局部数据
+            del res
+            gc.collect()
 
     def _tokenize_and_cache(self):
         """分块对数据进行token化并缓存"""
@@ -288,40 +307,28 @@ class SFT_Dataset(Dataset):
         # 准备数据块
         chunks = [self.samples[i:i + self.chunk_size] 
                  for i in range(0, len(self.samples), self.chunk_size)]
+        # print(f"len(chunks): {len(chunks)}")
         # chunks = chunks[:1] # 临时只处理一个，看看效果
-        
+        # print(f"len(chunks): {len(chunks)}")
         # 使用线程池处理数据块
+        self.result_queue = Queue()
+
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
             # 使用队列来管理任务
-            result_queue = Queue()
-            
-            def process_chunk(chunk, chunk_idx):
-                try:
-                    chunk_input_ids = self._tokenize_chunk(chunk)
-                    # 立即将结果放入队列
-                    result_queue.put((chunk_idx, chunk_input_ids))
-                except Exception as e:
-                    print(f"Error processing chunk {chunk_idx}: {e}")
-                finally:
-                    # 确保清理线程局部数据
-                    del chunk_input_ids
-                    gc.collect()
             
             # 提交所有任务
             for i, chunk in enumerate(chunks):
-                executor.submit(process_chunk, chunk, i)
+                executor.submit(self.process_chunk, chunk, i)
                 del chunk  # 立即清理原始数据
             
             # 处理完成的任务
             processed_chunks = 0
             while processed_chunks < len(chunks):
                 try:
-                    chunk_idx, chunk_input_ids = result_queue.get(timeout=30)  # 设置超时
+                    chunk_idx, res_dict = self.result_queue.get(timeout=30)  # 设置超时
                     
-                    # 使用 ListArray 直接存储嵌套列表
-                    chunk_input_ids = pa.array(chunk_input_ids, type=pa.list_(pa.int64()))
                     # 创建表
-                    table = pa.Table.from_pydict({'input_ids': chunk_input_ids})
+                    table = pa.Table.from_pydict(res_dict)
                     
                     # 写入parquet文件
                     if writer is None:
@@ -333,7 +340,7 @@ class SFT_Dataset(Dataset):
                     writer.write_table(table)
                     
                     # 立即清理数据
-                    del chunk_input_ids, table
+                    del res_dict, table
                     processed_chunks += 1
                     
                     # 定期进行垃圾回收
@@ -409,33 +416,135 @@ class SFT_Dataset(Dataset):
         
         return X, Y, loss_mask
 
-class PretrainVLDataset(PretrainDataset):
+class PretrainVLDataset(SFT_Dataset):
     def __init__(self,
                  data_path:str,
                  tokenizer:AutoTokenizer,
-                 max_len:int=2048,
+                 preprocess:Callable,
+                 image_base_dir:str,
+                 image_special_token:str="<|image_pad|>",
+                 max_len:int=1024,
                  chunk_size:int=10000,  # 每次处理的样本数
                  num_workers:int=min(os.cpu_count(), 16),     # token化时的线程数
                 ):
+        self.image_base_dir = image_base_dir
+        self.preprocess = preprocess
+        self.image_special_token = image_special_token
+
+        
         super().__init__(data_path,tokenizer,max_len,chunk_size,num_workers)
-        pass
+
+    def _gen_cache_path(self,data_path:str):
+        """生成缓存文件路径"""
+        cache_dir = os.path.dirname(data_path)
+        file_name = os.path.basename(data_path)
+        cache_filename = f"tokenized_pretrain_vl_{file_name}.parquet"
+        return os.path.join(cache_dir, cache_filename)
+    
+    def _preprocess_image(self,image_paths:str):
+        """预处理图片"""
+
+        image_tensors = []
+        for image_name in image_paths.split(','):
+            image_name = image_name.strip()
+            img_path = os.path.join(self.image_base_dir,image_name)
+            image = Image.open(img_path)
+            if image.mode in ['RGBA', 'LA']: 
+                image = image.convert('RGB')
+            inputs = self.preprocess(images=image, return_tensors="pt")['pixel_values']
+            image_tensors.append(inputs)
+
+        return image_tensors
+    
+    def _tokenize_chunk(self, chunk):
+        """处理单个数据块的token化"""
+        chunk_input_ids = []
+        chunk_image_paths = []
+        for sample in tqdm(chunk, desc="Tokenizing PretrainVL data chunk"):
+            assert "conversations" in sample, "conversations 不存在"
+            conversations = sample['conversations']
+            prompt = self._create_chat_prompt(conversations)
+            encoding = self.tokenizer(prompt)
+            chunk_input_ids.append(encoding.input_ids)
+            # 加载图片 并使用 预处理函数 预处理图片
+            image_paths = sample['image']
+            chunk_image_paths.append(image_paths)
+            # 及时清理不再需要的数据，手动回收
+            del sample, conversations, prompt, encoding, image_paths
+        chunk_input_ids = pa.array(chunk_input_ids, type=pa.list_(pa.int64()))
+        chunk_image_paths = pa.array(chunk_image_paths, type=pa.string())
+        return {"input_ids":chunk_input_ids,
+                "image_paths":chunk_image_paths}
+
+    def _init_from_cache(self):
+        """从缓存文件初始化"""  
+        self.parquet_file = pq.ParquetFile(self.cache_path)
+        self.num_rows = self.parquet_file.num_row_groups
+        print(f"Number of row groups: {self.num_rows}")
+        # 使用更高效的方式读取数据
+        df = pd.read_parquet(self.cache_path)
+        self.all_tokenized_samples = df['input_ids'].tolist()
+        self.all_image_paths = df['image_paths'].tolist()
+        print(f"Total tokens loaded: {len(self.all_tokenized_samples)}")
+        print(f"Total image paths loaded: {len(self.all_image_paths)}")
+    
+    def __getitem__(self, idx):
+        X, Y, loss_mask = super().__getitem__(idx)
+        image_paths = self.all_image_paths[idx]
+        image_tensors = []
+        for image_path in image_paths.split(','):
+            image_name = image_path.strip()
+            img_path = os.path.join(self.image_base_dir,image_name)
+            image = Image.open(img_path)
+            if image.mode in ['RGBA', 'LA']: 
+                image = image.convert('RGB')
+            inputs = self.preprocess(images=image, return_tensors="pt")['pixel_values']
+            image_tensors.append(inputs)
+        image_tensors = torch.stack(image_tensors)
+        return X, Y, loss_mask, image_tensors
+
 
 if __name__ == "__main__":
+    from src.model.model_vl import MiniLLM_VL
     current_dir = os.path.dirname(os.path.abspath(__file__))
     minillm_tokenizer_path = os.path.join(current_dir,"../../assets/minillm_tokenizer")
+    clip_model_path = os.path.join(current_dir,"../../assets/clip-vit-base-patch16")
+    print(f"clip_model_path: {clip_model_path}")
+
     tokenizer = AutoTokenizer.from_pretrained(minillm_tokenizer_path)
     data_path = os.path.join(current_dir,"../../data_sample/baidubaike_wikipedia_sample_data.parquet")
     data_path = "/mnt/d/pretrain/minimind/sft_mini_512.parquet"
 
-    sft_dataset = SFT_Dataset(data_path=data_path,
-                              tokenizer=tokenizer,
-                              max_len=1024,
-                              num_workers=8)
-    print(len(sft_dataset))
-    for i in range(len(sft_dataset)):
-        X,Y,loss_mask = sft_dataset[i]
-        print(X.shape,Y.shape,loss_mask.shape)
+    # sft_dataset = SFT_Dataset(data_path=data_path,
+    #                           tokenizer=tokenizer,
+    #                           max_len=1024,
+    #                           num_workers=8)
+    # print(len(sft_dataset))
+    # for i in range(len(sft_dataset)):
+    #     X,Y,loss_mask = sft_dataset[i]
+    #     print(X.shape,Y.shape,loss_mask.shape)
+    #     print(X)
+    #     print(Y)
+    #     print(loss_mask)
+    #     break
+
+    clip_model, preprocess = MiniLLM_VL.load_vision_model(model_path=clip_model_path)
+
+    data_path = "/mnt/d/pretrain/minimind-v_dataset/sft_vlm_data.jsonl"
+    image_base_dir = "/mnt/d/pretrain/minimind-v_dataset/sft_images"
+    pretrain_vl_dataset = PretrainVLDataset(data_path=data_path,
+                                           tokenizer=tokenizer,
+                                           preprocess=preprocess,
+                                           image_base_dir=image_base_dir,
+                                           max_len=1024,
+                                           chunk_size=10000,
+                                           num_workers=32)
+    print(len(pretrain_vl_dataset))
+    for i in range(len(pretrain_vl_dataset)):
+        X,Y,loss_mask,image_tensors = pretrain_vl_dataset[i]
+        print(X.shape,Y.shape,loss_mask.shape,image_tensors.shape)
         print(X)
         print(Y)
         print(loss_mask)
+        print(image_tensors)
         break
