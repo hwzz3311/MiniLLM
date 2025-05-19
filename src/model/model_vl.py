@@ -30,7 +30,7 @@ class MiniLLM_VL(MiniLLM):
         config = config or MiniLLM_VLConfig()
         super().__init__(config)
         self.config = config
-        self.vision_encoder,self.processor = self.load_vision_model(config.clip_model_path)
+        self.vision_encoder, self.processor = self.load_vision_model(config.clip_model_path)
         self.vision_proj = VisionProj(embed_dim=config.hidden_size)
 
     @staticmethod
@@ -86,7 +86,7 @@ class MiniLLM_VL(MiniLLM):
                             ))
                     res[batch_idx] = y_list
             return res or None
-        image_indices = find_indices(tokens, self.image_ids)
+        image_indices = find_indices(tokens, self.config.image_token_id)
         if vision_tensors is not None and image_indices:
             # 计算图像投影层
             vision_proj = self.vision_proj(vision_tensors)
@@ -147,13 +147,13 @@ class MiniLLM_VL(MiniLLM):
         pos_cis = self.pos_cis[start_pos: start_pos + input_ids.shape[1]]
         past_kvs = []
         for l, layer in enumerate(self.layers):
-            h, past_kvs = layer(
+            h, past_kv = layer(
                 h,
                 pos_cis,
                 past_key_value=  past_key_values[l] if past_key_values else None,
                 use_cache=use_cache
             )
-            past_kvs.append(past_kvs)
+            past_kvs.append(past_kv)
         logits = self.output(self.norm(h))
         # 将辅助损失添加到输出中
         aux_loss = sum(

@@ -58,7 +58,7 @@ class MiniLLMConfig(PretrainedConfig):
 class MiniLLM_VLConfig(MiniLLMConfig):
     model_type = "mini_llm_vl"
     base_path = os.path.abspath(__file__)
-    this_clip_model_path = os.path.abspath(os.path.join(base_path,"../assets/clip-vit-base-patch16"))
+    this_clip_model_path = os.path.abspath(os.path.join(base_path,"../../../assets/clip-vit-base-patch16"))
 
     def __init__(self,
                  clip_model_path: str=this_clip_model_path,

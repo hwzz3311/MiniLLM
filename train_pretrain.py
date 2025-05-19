@@ -147,7 +147,7 @@ def get_lr(current_step, total_steps, lr, warmup_iters):
         return min_lr + 0.5 * (lr - min_lr) * (1 + math.cos(math.pi * progress))
 
 
-def train_one_epoch(model, train_loader, optimizer, scaler, epoch, wandb):
+def train_one_epoch(model, train_loader, optimizer, scaler, epoch, wandb, args):
     model.train()
     iter_per_epoch = len(train_loader)
     loss_fn = CrossEntropyLoss(reduction="none")
@@ -178,7 +178,11 @@ def train_one_epoch(model, train_loader, optimizer, scaler, epoch, wandb):
     total_steps = args.epochs * iter_per_epoch
 
     for step, batch in enumerate(tqdm(train_loader, desc=f"Training of epoch {epoch}", total=iter_per_epoch)):
-        X, Y, loss_mask = batch
+        if args.train_model == "llm-vl":
+            X, Y, loss_mask, pixel_tensors = batch
+            pixel_tensors = pixel_tensors.to(args.device)
+        else:
+            X, Y, loss_mask = batch
         X = X.to(args.device)
         Y = Y.to(args.device)
         loss_mask = loss_mask.to(args.device)
@@ -198,7 +202,10 @@ def train_one_epoch(model, train_loader, optimizer, scaler, epoch, wandb):
             param_group["lr"] = lr
 
         with ctx:
-            res = model(X)
+            if args.train_model == "llm-vl":
+                res = model(X,pixel_tensors=pixel_tensors)
+            else:
+                res = model(X)
             # logits = res.logits
 
             # # 检查 logits 是否包含 NaN
@@ -295,12 +302,17 @@ if __name__ == "__main__":
     # default_data_path = os.path.join(this_dir,"data_sample/baidubaike_wikipedia_sample_data.parquet")
     # default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet" # 更换为minimind数据集测试效果
     default_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_512max.parquet"  # 1.2G
-    out_dir = os.path.join(this_dir, "./assets/minillm-vl_output/moe")
-    use_moe = True
+    
+    default_vl_data_path = "/mnt/d/pretrain/minimind-v_dataset/sft_vlm_data.jsonl"
+    default_data_path = default_vl_data_path
+    default_image_base_dir = "/mnt/d/pretrain/minimind-v_dataset/sft_images"
+
+    out_dir = os.path.join(this_dir, "./assets/minillm-vl_output/pretrain/")
+    use_moe = False
     train_model = "llm-vl"
     model_dir = os.path.join(out_dir, "dim_512/n_layers_8/")
-    llm_model_check_point_path = ""
-    vl_model_check_point_path = "/mnt/d/linux/LLM/MiniLLM/assets/minillm_output/pretrain/dim_512/n_layers_8/minillm_pretain_v1.0_build20250424.pth"
+    llm_model_check_point_path = "/mnt/d/linux/LLM/MiniLLM/assets/minillm_output/sft/dim_512/minillm_sft_v1.0_build20250425.pth"
+    vl_model_check_point_path = ""
     if os.path.exists(model_dir):
         # 获取模型目录下所有文件，按照创建时间进行倒序。
         model_files = os.listdir(model_dir)
@@ -312,10 +324,10 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Train pretrain model")
     parser.add_argument("--out_dir", type=str, default=out_dir, help="The output directory")
-    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--train_model", type=str, default=train_model)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--learning_rate", type=float, default=9e-4)
+    parser.add_argument("--learning_rate", type=float, default=5e-4)
     parser.add_argument("--llm_checkpoint_path", default=llm_model_check_point_path)
     parser.add_argument("--vl_checkpoint_path", default=vl_model_check_point_path)
     parser.add_argument("--device", type=str, default=device)
@@ -335,18 +347,29 @@ if __name__ == "__main__":
     parser.add_argument("--max_seq_len", type=int, default=512)  # 最大序列长度
     parser.add_argument("--use_moe", default=use_moe, type=bool)  # 是否使用 MoE
     parser.add_argument("--data_path", type=str, default=default_data_path)  # 数据路径
+    parser.add_argument("--image_base_dir", type=str, default=default_image_base_dir)  # 图片路径
 
     args = parser.parse_args()
     Log("start training")
     print(args)
     args.save_dir = os.path.join(args.out_dir)
     os.makedirs(args.save_dir, exist_ok=True)
-    lm_config = MiniLLMConfig(
-        hidden_size=args.dim,
-        n_layers=args.n_layers,
-        max_seq_len=args.max_seq_len,
-        use_moe=args.use_moe
-    )
+    if train_model == "llm":
+        lm_config = MiniLLMConfig(
+            hidden_size=args.dim,
+            n_layers=args.n_layers,
+            max_seq_len=args.max_seq_len,
+            use_moe=args.use_moe
+        )
+    elif train_model == "llm-vl":
+        lm_config = MiniLLM_VLConfig(
+            hidden_size=args.dim,
+            n_layers=args.n_layers,
+            max_seq_len=args.max_seq_len,
+            use_moe=args.use_moe
+        )
+    else:
+        raise ValueError(f"train_model 参数错误，请检查 train_model 参数")
     Log(f"lm_config: {lm_config}")
     tokens_per_iter = args.batch_size * lm_config.max_seq_len  # 每个迭代步的token数
 
@@ -384,11 +407,15 @@ if __name__ == "__main__":
                                args.max_seq_len,
                                num_workers=16)
     elif train_model == "llm-vl":
-        train_ds = PretrainVLDataset(args.data_path,
-                                    tokenizer,
-                                    preprocess,
-                                    args.max_seq_len,
-                                    num_workers=16)
+        assert args.data_path is not None, "data_path 不能为空"
+        assert args.image_base_dir is not None, "image_base_dir 不能为空"
+        train_ds = PretrainVLDataset(data_path=args.data_path,
+                                           tokenizer=tokenizer,
+                                           preprocess=preprocess,
+                                           image_base_dir=args.image_base_dir,
+                                           max_len=args.max_seq_len,
+                                           chunk_size=10000,
+                                           num_workers=32)
     else:
         raise ValueError(f"train_model 参数错误，请检查 train_model 参数")
     train_sampler = DistributedSampler(train_ds) if ddp else None  # 分布式训练的采样器
@@ -417,12 +444,12 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project,
                    name=args.wandb_run_name,
                    config=vars(args),
-                   id="59y16of0",
+                   id="5v6d9l8e",
                    resume="must"
                    )
     else:
         wandb = None
     for epoch in range(args.epochs):
-        train_one_epoch(model, train_loader, optimizer, scaler, epoch, wandb)
+        train_one_epoch(model, train_loader, optimizer, scaler, epoch, wandb, args)
 
     Log("done")
