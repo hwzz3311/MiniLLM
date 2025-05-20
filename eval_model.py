@@ -4,6 +4,7 @@ import torch
 import random
 import numpy as np
 from src.model.model import MiniLLM, MiniLLMConfig
+from src.model.model_vl import MiniLLM_VL, MiniLLM_VLConfig
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
@@ -18,7 +19,7 @@ def init_model(args):
             vocab_size=len(tokenizer)
         ))
         state_dict = torch.load(args.model_path, map_location=args.device)
-        # 删除所有以 'mask' 开头的键
+        # 删除所有以 'mask' 开头的键，是为了避免加载lora权重时，出现key不匹配的问题
         model.load_state_dict({k: v for k, v in state_dict.items() if 'mask' not in k}, strict=True)
         if args.lora_name != 'None':
             # TODO 加载lora
@@ -30,6 +31,31 @@ def init_model(args):
     print(f'MiniMind模型参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M(illion)')
     return model.eval().to(args.device), tokenizer
 
+
+def init_vl_model(args):
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
+    if args.load == 0:
+        model = MiniLLM_VL(MiniLLM_VLConfig(
+            dim=args.dim,
+            n_layers=args.n_layers,
+            max_seq_len=args.max_seq_len,
+            use_moe=args.use_moe,
+            vocab_size=len(tokenizer)
+        ))
+        # 
+        state_dict = torch.load(args.model_path, map_location=args.device)
+        # 删除所有以 'mask' 开头的键，是为了避免加载lora权重时，出现key不匹配的问题
+        model.load_state_dict({k: v for k, v in state_dict.items() if 'mask' not in k}, strict=True)
+        if args.lora_name != 'None':
+            # TODO 加载lora
+            pass
+    else:
+        transformers_model_path = './MiniLLM-VL'
+        tokenizer = AutoTokenizer.from_pretrained(transformers_model_path)
+        model = AutoModelForCausalLM.from_pretrained(transformers_model_path, trust_remote_code=True)
+    print(f'MiniMind-VL模型参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M(illion)')
+    vision_model, processor = MiniLLM_VL.load_vision_model(model.config.clip_model_path)
+    return model.eval().to(args.device), tokenizer, vision_model, processor
 
 # 设置可复现的随机种子
 def setup_seed(seed):
