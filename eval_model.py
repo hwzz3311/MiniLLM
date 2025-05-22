@@ -6,6 +6,9 @@ import numpy as np
 from src.model.model import MiniLLM, MiniLLMConfig
 from src.model.model_vl import MiniLLM_VL, MiniLLM_VLConfig
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from PIL import Image
+import json
+base_dir = os.path.dirname(os.path.abspath(__file__))
 
 
 def init_model(args):
@@ -44,6 +47,7 @@ def init_vl_model(args):
         ))
         # 
         state_dict = torch.load(args.model_path, map_location=args.device)
+        print(f"success load model : {args.model_path}")
         # 删除所有以 'mask' 开头的键，是为了避免加载lora权重时，出现key不匹配的问题
         model.load_state_dict({k: v for k, v in state_dict.items() if 'mask' not in k}, strict=True)
         if args.lora_name != 'None':
@@ -55,7 +59,8 @@ def init_vl_model(args):
         model = AutoModelForCausalLM.from_pretrained(transformers_model_path, trust_remote_code=True)
     print(f'MiniMind-VL模型参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M(illion)')
     vision_model, processor = MiniLLM_VL.load_vision_model(model.config.clip_model_path)
-    return model.eval().to(args.device), tokenizer, vision_model, processor
+    vl_llm = model.eval().to(args.device)
+    return vl_llm, tokenizer, vision_model, processor
 
 # 设置可复现的随机种子
 def setup_seed(seed):
@@ -119,6 +124,89 @@ def get_prompt_datas(args):
 
     return prompt_datas
 
+def get_prompt_datas_for_vl(args, preprocess_fn, model:MiniLLM_VL):
+    # 单图片的识别
+    single_image_dir = os.path.join(base_dir, "./assets/eval_images")
+    single_image_files = os.listdir(single_image_dir)
+    single_image_files = [os.path.join(single_image_dir, file) for file in single_image_files]
+    # 多图片的识别
+    multi_image_dir = os.path.join(base_dir, "./assets/eval_multi_images")
+    multi_image_files = {}
+    for sub_dir in os.listdir(multi_image_dir):
+        sub_dir_path = os.path.join(multi_image_dir, sub_dir)
+        if os.path.isdir(sub_dir_path):
+            for file in os.listdir(sub_dir_path):
+                multi_image_files[sub_dir] = os.path.join(sub_dir_path, file)
+    # 分别为 单个图片和多个图片构建不同的prompt
+    prompt_datas = []
+    for single_image_file in single_image_files:
+        prompt = f"{model.config.image_special_token}\n描述一下这个图像的内容。"
+        image = Image.open(single_image_file).convert("RGB")
+        pixel_tensors = MiniLLM_VL.image2tensor(image, preprocess_fn).to(args.device).unsqueeze(0)
+
+        prompt_datas.append({
+            "image_path": single_image_file,
+            "prompt": prompt,
+            "pixel_tensors": pixel_tensors
+        })
+    for sub_dir, multi_image_file_list in multi_image_files.items():
+        prompt = (f"{model.config.image_special_token}\n"
+                  f"{model.config.image_special_token}\n"
+                  f"比较一下两张图像的异同点。")
+        pixel_tensors_multi = []
+        for multi_image_file in multi_image_file_list:
+            image = Image.open(multi_image_file).convert("RGB")
+            pixel_tensors = MiniLLM_VL.image2tensor(image, preprocess_fn).to(args.device).unsqueeze(0)
+            pixel_tensors_multi.append(pixel_tensors)
+        # 将多张图片的像素张量拼接起来
+        pixel_tensors = torch.cat(pixel_tensors_multi, dim=0).to(args.device).unsqueeze(0)
+
+        prompt_datas.append({
+            "image_path": json.dumps(multi_image_file_list,ensure_ascii=False,indent=4),
+            "prompt": prompt,
+            "pixel_tensors": pixel_tensors
+        })
+    return prompt_datas
+
+                
+
+def chat_with_model(model, tokenizer, args, prompt, eos_token_id, pixel_tensors=None):
+    answer = prompt
+    with torch.no_grad():
+        # 将prompt转换为token
+        x = torch.tensor(tokenizer(prompt)["input_ids"], device=args.device,).unsqueeze(0)
+        # x 的形状为 [1, seq_len]，既【batch_size, seq_len】
+        outputs = model.generate(
+            x,
+            eos_token_id=eos_token_id,
+            max_new_tokens=args.max_seq_len,
+            temperature=args.temperature,
+            stream=args.stream,
+            pad_token_id=tokenizer.pad_token_id,
+            **({"pixel_tensors":pixel_tensors} if isinstance(model, MiniLLM_VL) else {})
+        )
+        print('🤖️: ', end='')
+        try:
+            if not args.stream:
+                # 非流式模式下，直接打印出答案
+                answer = tokenizer.decode(outputs.squeeze()[x.shape[1]:].tolist(), skip_special_tokens=True)
+                print(answer, end='')
+            else:
+                # 流式模式下，逐字符打印出答案
+                history_idx = 0
+                for y in outputs:
+                    # y 的形状为 [1, seq_len]，既【batch_size, seq_len】
+                    # 因此需要使用 y[0] 来获取第一个样本的生成结果，既【seq_len】
+                    answer = tokenizer.decode(y[0].tolist(), skip_special_tokens=True)
+                    # if (answer and answer[-1] == '�') or not answer:
+                    # continue
+                    print(answer[history_idx:], end='', flush=True)
+                    history_idx = len(answer)
+
+        except StopIteration:
+            print("No answer")
+        print("\n")
+    return answer
 
 def main():
     # 初始化参数 
@@ -135,6 +223,7 @@ def main():
     # model_output_dir = os.path.join(this_dir,"./minillm_output")
     use_moe = True
     sft = False
+    model_type = "llm"
     model_output_dir = os.path.join(this_dir,"./assets/minillm_output/")
     if use_moe:
         model_output_dir = os.path.join(model_output_dir,"moe")
@@ -150,6 +239,7 @@ def main():
     model_path = os.path.join(model_dir, model_files[0])
     print(f"使用模型: {model_path}")
     parser = argparse.ArgumentParser(description="eval mini-llm model")
+    parser.add_argument("--model_type", type=str, default=model_type, help="Support llm, llm-vl")
     parser.add_argument("--lora_name", type=str, default="None", help="The lora name")
     parser.add_argument("--model_path", type=str, default=model_path, help="The model checkpoint path")
     parser.add_argument("--tokenizer_path", type=str, default=tokenizer_path, help="The tokenizer path")
@@ -172,60 +262,75 @@ def main():
                         help="0: 预训练模型，1: SFT-Chat模型，2: RLHF-Chat模型，3: Reason模型，4: RLAIF-Chat模型")
 
     args = parser.parse_args()
-    model, tokenizer = init_model(args)
-    prompt_datas = get_prompt_datas(args)
+    if args.model_type == "llm":
+        model, tokenizer = init_model(args)
+        prompt_datas = get_prompt_datas(args)
+    elif args.model_type == "llm-vl":
+        model, tokenizer, vision_model, processor = init_vl_model(args)
+        prompt_datas = get_prompt_datas_for_vl(args, processor, model)
+    print(f"success init model for {args.model_type}")
+
+    
     test_model = int(input("[0] 自动测试\n[1] 手动测试\n"))
     messages = []
     eos_token_id = tokenizer.eos_token_id
-    if args.model_mode == 1: # SFT-Chat模型
-        eos_token_id = tokenizer("<|im_end|>").input_ids[0]
-        print(f"SFT-Chat模型 eos_token_id: {eos_token_id}")
-    for idx, prompt in enumerate(prompt_datas if test_model == 0 else iter(lambda: input('👶: '), '')):
-        setup_seed(random.randint(0, 2048))  # 每次随机种子
-        if test_model == 0:  # 自动测试模式下，需要打印出自动测试的prompt
-            print(f'👶: {prompt}')
-        messages = messages[-args.history_cnt:] if args.history_cnt else []
-        messages.append({'role': 'user', 'content': prompt})
-        new_prompt = tokenizer.apply_chat_template(messages,
-                                                   tokenize=False,
-                                                   add_generation_prompt=True)
-        # 预训练模型 下仅使用 bos_token + prompt，其他模型则使用 sft_chat_template
-        new_prompt = new_prompt[-args.max_seq_len - 1:] if args.model_mode != 0 else (
-            tokenizer.bos_token + prompt if tokenizer.bos_token else prompt)
-        answer = new_prompt
-        with torch.no_grad():
-            #
-            x = torch.tensor(tokenizer(new_prompt)["input_ids"], device=args.device, ).unsqueeze(0)
-            # x 的形状为 [1, seq_len]，既【batch_size, seq_len】
-            outputs = model.generate(
-                x,
-                eos_token_id=eos_token_id,
-                max_new_tokens=args.max_seq_len,
-                temperature=args.temperature,
-                stream=args.stream,
-                pad_token_id=tokenizer.pad_token_id
-            )
-            print('🤖️: ', end='')
-            try:
-                if not args.stream:
-                    # 非流式模式下，直接打印出答案
-                    print(tokenizer.decode(outputs.squeeze()[x.shape[1]:].tolist(), skip_special_tokens=True), end='')
-                else:
-                    # 流式模式下，逐字符打印出答案
-                    history_idx = 0
-                    for y in outputs:
-                        # y 的形状为 [1, seq_len]，既【batch_size, seq_len】
-                        # 因此需要使用 y[0] 来获取第一个样本的生成结果，既【seq_len】
-                        answer = tokenizer.decode(y[0].tolist(), skip_special_tokens=True)
-                        # if (answer and answer[-1] == '�') or not answer:
-                        # continue
-                        print(answer[history_idx:], end='', flush=True)
-                        history_idx = len(answer)
+    if args.model_type == "llm":
+        if args.model_mode == 1: # SFT-Chat模型
+            eos_token_id = tokenizer("<|im_end|>").input_ids[0]
+            print(f"SFT-Chat模型 eos_token_id: {eos_token_id}")
+        for idx, prompt in enumerate(prompt_datas if test_model == 0 else iter(lambda: input('👶: '), '')):
+            setup_seed(random.randint(0, 2048))  # 每次随机种子
+            if test_model == 0:  # 自动测试模式下，需要打印出自动测试的prompt
+                print(f'👶: {prompt}')
+            messages = messages[-args.history_cnt:] if args.history_cnt else []
+            messages.append({'role': 'user', 'content': prompt})
+            new_prompt = tokenizer.apply_chat_template(messages,
+                                                    tokenize=False,
+                                                    add_generation_prompt=True)
+            # 预训练模型 下仅使用 bos_token + prompt，其他模型则使用 sft_chat_template
+            new_prompt = new_prompt[-args.max_seq_len - 1:] if args.model_mode != 0 else (
+                tokenizer.bos_token + prompt if tokenizer.bos_token else prompt)
+            answer = chat_with_model(model, tokenizer, args, new_prompt, eos_token_id)
+            messages.append({"role": "assistant", "content": answer})
+    elif args.model_type == "llm-vl":
+        if args.model_mode == 1: # SFT-Chat模型
+            eos_token_id = tokenizer("<|im_end|>").input_ids[0]
+            print(f"SFT-Chat模型 eos_token_id: {eos_token_id}")
+        # 定义一个自定义输入的函数，先接收一个图片路径，然后接收一个用户问题
+        def custom_input():
+            while True:
+                # 提示输入一个图片路径
+                image_path = input('👶: 请输入一个图片路径: ')
+                # 提示输入一个用户问题
+                user_question = input('👶: 请输入指令: ')
+                image = Image.open(image_path).convert("RGB")
+                pixel_tensors = MiniLLM_VL.image2tensor(image, processor).to(args.device).unsqueeze(0)
+                prompt = f"{model.config.image_special_token}\n{user_question}"
+                yield {
+                    "image_path": image_path,
+                    "prompt": prompt,
+                    "pixel_tensors": pixel_tensors
+                }
+        for idx, prompt_dict in enumerate(prompt_datas if test_model == 0 else iter(lambda: custom_input)):
+            setup_seed(random.randint(0, 2048))  # 每次随机种子
+            prompt = prompt_dict["prompt"]
+            image_path = prompt_dict["image_path"]
+            pixel_tensors = prompt_dict["pixel_tensors"]
 
-            except StopIteration:
-                print("No answer")
-            print("\n")
-        messages.append({"role": "assistant", "content": answer})
+            prin_prompt = prompt.replace(model.config.image_special_token,"")
+            prin_prompt = prin_prompt.strip()
+            print(f'👶: {prin_prompt}')
+            print(f"[image_path] : {image_path}")
+            messages = messages[-args.history_cnt:] if args.history_cnt else []
+            messages.append({'role': 'user', 'content': prompt})
+            new_prompt = tokenizer.apply_chat_template(messages,
+                                                    tokenize=False,
+                                                    add_generation_prompt=True)
+            # 预训练模型 下仅使用 bos_token + prompt，其他模型则使用 sft_chat_template
+            new_prompt = new_prompt[-args.max_seq_len - 1:] if args.model_mode != 0 else (
+                tokenizer.bos_token + prompt if tokenizer.bos_token else prompt)
+            answer = chat_with_model(model, tokenizer, args, new_prompt, eos_token_id, pixel_tensors)
+            messages.append({"role": "assistant", "content": answer})
 
 
 if __name__ == "__main__":
