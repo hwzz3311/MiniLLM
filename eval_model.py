@@ -1,5 +1,7 @@
 import argparse
 import os
+from collections import defaultdict
+
 import torch
 import random
 import numpy as np
@@ -135,8 +137,9 @@ def get_prompt_datas_for_vl(args, preprocess_fn, model:MiniLLM_VL):
     for sub_dir in os.listdir(multi_image_dir):
         sub_dir_path = os.path.join(multi_image_dir, sub_dir)
         if os.path.isdir(sub_dir_path):
+            multi_image_files[sub_dir] = []
             for file in os.listdir(sub_dir_path):
-                multi_image_files[sub_dir] = os.path.join(sub_dir_path, file)
+                multi_image_files[sub_dir].append(os.path.join(sub_dir_path, file))
     # 分别为 单个图片和多个图片构建不同的prompt
     prompt_datas = []
     for single_image_file in single_image_files:
@@ -221,14 +224,17 @@ def main():
 
     default_data_path = os.path.join(this_dir, "./assets/data_sample/wikipedia_zh_sample_data.json")
     # model_output_dir = os.path.join(this_dir,"./minillm_output")
-    use_moe = True
+    use_moe = False
     sft = False
-    model_type = "llm"
-    model_output_dir = os.path.join(this_dir,"./assets/minillm_output/")
+    pretrain = True
+    model_type = "llm-vl"
+    model_output_dir = os.path.join(this_dir,f"./assets/mini{model_type}_output/")
     if use_moe:
         model_output_dir = os.path.join(model_output_dir,"moe")
     if sft:
         model_output_dir = os.path.join(model_output_dir,"sft")
+    if pretrain:
+        model_output_dir = os.path.join(model_output_dir, "pretrain")
     
 
     model_dir = os.path.join(model_output_dir,"dim_512/n_layers_8")
@@ -267,6 +273,7 @@ def main():
         prompt_datas = get_prompt_datas(args)
     elif args.model_type == "llm-vl":
         model, tokenizer, vision_model, processor = init_vl_model(args)
+        model:MiniLLM_VL
         prompt_datas = get_prompt_datas_for_vl(args, processor, model)
     print(f"success init model for {args.model_type}")
 

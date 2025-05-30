@@ -49,7 +49,7 @@ class MiniLLM_VL(MiniLLM):
         # 将PIL.Image.Image转换为tensor
         if image.mode in ["LA","RGBA"]:
             image = image.convert("RGB")
-        image_inputs = processor(image,return_tensors="pt")["pixel_values"]
+        image_inputs = processor(images=image,return_tensors="pt")["pixel_values"]
         return image_inputs
     
     @staticmethod
