@@ -169,6 +169,17 @@ def get_prompt_datas_for_vl(args, preprocess_fn, model:MiniLLM_VL):
             "prompt": prompt,
             "pixel_tensors": pixel_tensors
         })
+    prompt_datas = []
+    img_path = "/mnt/d/pretrain/minimind-v_dataset/sft_images/train-00058-of-00059_image_2671_0.jpg"
+    prompt = f"{model.config.image_special_token}\n图片中的直升机是什么颜色？"
+    image = Image.open(img_path).convert("RGB")
+    pixel_tensors = MiniLLM_VL.image2tensor(image, preprocess_fn).to(args.device).unsqueeze(0)
+    prompt_datas.append({
+        "image_path": img_path,
+        "prompt": prompt,
+        "pixel_tensors": pixel_tensors
+    })
+
     return prompt_datas
 
                 
@@ -235,7 +246,6 @@ def main():
         model_output_dir = os.path.join(model_output_dir,"sft")
     if pretrain:
         model_output_dir = os.path.join(model_output_dir, "pretrain")
-    
 
     model_dir = os.path.join(model_output_dir,"dim_512/n_layers_8")
     # model_dir = model_output_dir
