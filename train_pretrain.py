@@ -320,14 +320,15 @@ if __name__ == "__main__":
         if len(model_files) > 0:
             vl_model_check_point_path = os.path.join(model_dir, model_files[0])
             print(f"使用模型: {vl_model_check_point_path}")
+    # vl_model_check_point_path = ""
     
 
     parser = argparse.ArgumentParser(description="Train pretrain model")
     parser.add_argument("--out_dir", type=str, default=out_dir, help="The output directory")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--train_model", type=str, default=train_model)
-    parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--learning_rate", type=float, default=5e-4)
+    parser.add_argument("--batch_size", type=int, default=80)
+    parser.add_argument("--learning_rate", type=float, default=9e-4)
     parser.add_argument("--llm_checkpoint_path", default=llm_model_check_point_path)
     parser.add_argument("--vl_checkpoint_path", default=vl_model_check_point_path)
     parser.add_argument("--device", type=str, default=device)
@@ -439,6 +440,8 @@ if __name__ == "__main__":
     Log("training")
     # 等待数据和模型都初始化后，再初始化 wandb
     if args.use_wandb and (not ddp or ddp_local_rank == 0):  # 如果使用 wandb 且不是分布式训练或当前进程是主进程，则初始化 wandb
+        # wandb = None
+
         import wandb
 
         wandb.init(project=args.wandb_project,

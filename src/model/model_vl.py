@@ -32,6 +32,10 @@ class MiniLLM_VL(MiniLLM):
         self.config = config
         self.vision_encoder, self.processor = self.load_vision_model(config.clip_model_path)
         self.vision_proj = VisionProj(embed_dim=config.hidden_size)
+        tokenizer_path = "/mnt/d/linux/LLM/MiniLLM/assets/minillm_tokenizer/"
+        from transformers import AutoTokenizer
+
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
     @staticmethod
     def load_vision_model(model_path):
@@ -116,7 +120,6 @@ class MiniLLM_VL(MiniLLM):
                     new_h.append(h[i])
             h = torch.stack(new_h,dim=0)
         return h
-
     
     def forward(self,
                 input_ids:Optional[torch.Tensor] = None,

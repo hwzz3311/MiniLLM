@@ -310,9 +310,9 @@ def main():
             answer = chat_with_model(model, tokenizer, args, new_prompt, eos_token_id)
             messages.append({"role": "assistant", "content": answer})
     elif args.model_type == "llm-vl":
-        if args.model_mode == 1: # SFT-Chat模型
-            eos_token_id = tokenizer("<|im_end|>").input_ids[0]
-            print(f"SFT-Chat模型 eos_token_id: {eos_token_id}")
+        # if args.model_mode == 1: # SFT-Chat模型
+        eos_token_id = tokenizer("<|im_end|>").input_ids[0]
+        print(f"VL 模型 eos_token_id: {eos_token_id}")
         # 定义一个自定义输入的函数，先接收一个图片路径，然后接收一个用户问题
         def custom_input():
             while True:
@@ -343,9 +343,8 @@ def main():
             new_prompt = tokenizer.apply_chat_template(messages,
                                                     tokenize=False,
                                                     add_generation_prompt=True)
-            # 预训练模型 下仅使用 bos_token + prompt，其他模型则使用 sft_chat_template
-            new_prompt = new_prompt[-args.max_seq_len - 1:] if args.model_mode != 0 else (
-                tokenizer.bos_token + prompt if tokenizer.bos_token else prompt)
+            # vl 模型下均使用 sft格式
+            new_prompt = new_prompt[-args.max_seq_len - 1:]
             answer = chat_with_model(model, tokenizer, args, new_prompt, eos_token_id, pixel_tensors)
             messages.append({"role": "assistant", "content": answer})
 

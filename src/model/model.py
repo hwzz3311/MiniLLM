@@ -872,7 +872,12 @@ class MiniLLM(PreTrainedModel):
             logits, past_kvs = out.logits[:, -1, :], out.past_key_values  # 获取最后一个token的logits和past_kvs
             # 对当前已生成的 token（即在 input_ids 中出现过的 token）对应的 logits 值进行“惩罚”，除以一个 repetition_penalty 值。
             # 这样做可以降低重复 token 的生成概率，从而减少重复。
-            logits[:, list(set(input_ids.tolist()[0]))] /= repetition_penalty
+            vocab_size = logits.shape[1]
+            unique_ids = list(set(input_ids.tolist()[0]))
+            safe_ids = [idx for idx in unique_ids if 0 <= idx < vocab_size]
+
+            logits[:, safe_ids] /= repetition_penalty
+            # logits[:, list(set(input_ids.tolist()[0]))] /= repetition_penalty
             # 使用 temperature 参数来控制生成结果的多样性。
             logits /= (temperature + 1e-9)
             if top_p is not None and top_p < 1.0:

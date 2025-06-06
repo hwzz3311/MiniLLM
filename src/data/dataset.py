@@ -265,6 +265,7 @@ class SFT_Dataset(Dataset):
         """创建chat prompt"""
         messages = []
         for i,conversation in enumerate(conversations):
+
             role = "user" if i % 2 == 0 else "assistant"
             messages.append({"role":role,"content":conversation["content"]})
         # 返回 tokenizer 的 chat_template 的格式
@@ -422,7 +423,7 @@ class PretrainVLDataset(SFT_Dataset):
                  tokenizer:AutoTokenizer,
                  preprocess:Callable,
                  image_base_dir:str,
-                 image_special_token:str="<|image_pad|>",
+                 image_special_token:str="<|image_pad|>" * 196,
                  max_len:int=1024,
                  chunk_size:int=10000,  # 每次处理的样本数
                  num_workers:int=min(os.cpu_count(), 16),     # token化时的线程数
@@ -455,7 +456,22 @@ class PretrainVLDataset(SFT_Dataset):
             image_tensors.append(inputs)
 
         return image_tensors
-    
+
+    def _create_chat_prompt(self, conversations):
+        """创建chat prompt"""
+        messages = []
+        for i, conversation in enumerate(conversations):
+                # 清空  <image> 标记
+            if "role" in conversation.keys() and i % 2 == 0:
+                if "<image>" in conversation["content"]:
+                    conversation["content"] = conversation["content"].replace("<image>",self.image_special_token)
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": conversation["content"]})
+        # 返回 tokenizer 的 chat_template 的格式
+        prompt = self.tokenizer.apply_chat_template(messages,
+                                                    tokenize=False,
+                                                    add_generation_prompt=False)
+        return prompt
     def _tokenize_chunk(self, chunk):
         """处理单个数据块的token化"""
         chunk_input_ids = []
@@ -491,6 +507,10 @@ class PretrainVLDataset(SFT_Dataset):
     def __getitem__(self, idx):
         X, Y, loss_mask = super().__getitem__(idx)
         image_paths = self.all_image_paths[idx]
+        # 把 X和Y 中tensor还原成 文本，并打印，看下和图片是否对应。
+        x_text = self.tokenizer.decode(X.cpu().tolist())
+        y_text = self.tokenizer.decode(Y.cpu().tolist())
+
         image_tensors = []
         for image_path in image_paths.split(','):
             image_name = image_path.strip()
