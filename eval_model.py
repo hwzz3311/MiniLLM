@@ -152,6 +152,7 @@ def get_prompt_datas_for_vl(args, preprocess_fn, model:MiniLLM_VL):
             "prompt": prompt,
             "pixel_tensors": pixel_tensors
         })
+    multi_image_files= {}
     for sub_dir, multi_image_file_list in multi_image_files.items():
         prompt = (f"{model.config.image_special_token}\n"
                   f"{model.config.image_special_token}\n"
@@ -238,7 +239,7 @@ def main():
     use_moe = False
     sft = False
     pretrain = True
-    model_type = "llm-vl"
+    model_type = "llm"
     model_output_dir = os.path.join(this_dir,f"./assets/mini{model_type}_output/")
     if use_moe:
         model_output_dir = os.path.join(model_output_dir,"moe")

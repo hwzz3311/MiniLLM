@@ -1,6 +1,9 @@
 import numpy
+import numpy as np
 import torch
 import os
+
+from numpy import ndarray
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 import pandas as pd
@@ -40,9 +43,7 @@ class PretrainDataset(Dataset):
         self.num_workers = num_workers
         
         # 生成缓存文件路径
-        cache_dir = os.path.dirname(data_path)
-        cache_filename = f"tokenized_{os.path.basename(data_path)}"
-        self.cache_path = os.path.join(cache_dir, cache_filename)
+        self.cache_path = self._gen_cache_path(data_path)
         
         # 检查缓存文件是否存在
         if os.path.exists(self.cache_path):
@@ -61,6 +62,12 @@ class PretrainDataset(Dataset):
         self.total_samples = (self.total_length // self.max_len) * self.max_len
         print(f"total_length: {self.total_length}")
         print(f"total_samples: {self.total_samples}")
+
+    def _gen_cache_path(self,data_path:str):
+        cache_dir = os.path.dirname(data_path)
+        file_name = os.path.basename(data_path)
+        cache_filename = f"tokenized_{file_name}.parquet"
+        return os.path.join(cache_dir, cache_filename)
     def _tokenize_chunk(self, chunk):
         """处理单个数据块的token化"""
         chunk_input_ids = []
@@ -129,7 +136,7 @@ class PretrainDataset(Dataset):
                 try:
                     chunk_idx, chunk_input_ids = result_queue.get(timeout=30)  # 设置超时
                     # 使用 ListArray 直接存储嵌套列表
-                    chunk_input_ids = pa.array(chunk_input_ids, type=pa.list_(pa.int64()))
+                    chunk_input_ids = pa.array([chunk_input_ids], type=pa.list_(pa.int64()))
                     # 创建表
                     table = pa.Table.from_pydict({'input_ids': chunk_input_ids})
                     # 写入parquet文件
@@ -175,6 +182,11 @@ class PretrainDataset(Dataset):
         # 方案1：使用pandas直接读取（更快）
         df = pd.read_parquet(self.cache_path)
         self.all_input_ids = df['input_ids'].tolist()
+        if isinstance(self.all_input_ids[0],ndarray):
+            all_input_ids_ = []
+            for i in self.all_input_ids:
+                all_input_ids_.extend(i)
+            self.all_input_ids = all_input_ids_
         
         # 或者方案2：使用pyarrow的批处理读取
         # self.all_input_ids = []
@@ -211,7 +223,9 @@ class PretrainDataset(Dataset):
         
         # 创建loss_mask（所有位置都参与计算）
         loss_mask = torch.ones_like(input_ids, dtype=torch.float)
-        
+        # 只将bos token的位置设置为0，eos token需要参与预测
+        if self.tokenizer.bos_token_id is not None:
+            loss_mask[input_ids == self.tokenizer.bos_token_id] = 0
         # 准备输入和标签
         X = input_ids[:-1].clone().detach().to(torch.long)
         Y = input_ids[1:].clone().detach().to(torch.long)
@@ -532,39 +546,53 @@ if __name__ == "__main__":
     print(f"clip_model_path: {clip_model_path}")
 
     tokenizer = AutoTokenizer.from_pretrained(minillm_tokenizer_path)
-    data_path = os.path.join(current_dir,"../../data_sample/baidubaike_wikipedia_sample_data.parquet")
-    data_path = "/mnt/d/pretrain/minimind/sft_mini_512.parquet"
-
-    # sft_dataset = SFT_Dataset(data_path=data_path,
+    # data_path = os.path.join(current_dir,"../../data_sample/baidubaike_wikipedia_sample_data.parquet")
+    # data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet"
+    # pretrain_dataset = PretrainDataset(data_path=data_path,
     #                           tokenizer=tokenizer,
     #                           max_len=1024,
-    #                           num_workers=8)
-    # print(len(sft_dataset))
-    # for i in range(len(sft_dataset)):
-    #     X,Y,loss_mask = sft_dataset[i]
+    #                           num_workers=32)
+    # print(len(pretrain_dataset))
+    # for i in range(len(pretrain_dataset)):
+    #     X,Y,loss_mask = pretrain_dataset[i]
     #     print(X.shape,Y.shape,loss_mask.shape)
     #     print(X)
     #     print(Y)
     #     print(loss_mask)
     #     break
 
-    clip_model, preprocess = MiniLLM_VL.load_vision_model(model_path=clip_model_path)
+    data_path = "/mnt/d/pretrain/minimind/sft_512.jsonl"
 
-    data_path = "/mnt/d/pretrain/minimind-v_dataset/sft_vlm_data.jsonl"
-    image_base_dir = "/mnt/d/pretrain/minimind-v_dataset/sft_images"
-    pretrain_vl_dataset = PretrainVLDataset(data_path=data_path,
-                                           tokenizer=tokenizer,
-                                           preprocess=preprocess,
-                                           image_base_dir=image_base_dir,
-                                           max_len=1024,
-                                           chunk_size=10000,
-                                           num_workers=32)
-    print(len(pretrain_vl_dataset))
-    for i in range(len(pretrain_vl_dataset)):
-        X,Y,loss_mask,image_tensors = pretrain_vl_dataset[i]
-        print(X.shape,Y.shape,loss_mask.shape,image_tensors.shape)
+    sft_dataset = SFT_Dataset(data_path=data_path,
+                              tokenizer=tokenizer,
+                              max_len=1024,
+                              num_workers=8)
+    print(len(sft_dataset))
+    for i in range(len(sft_dataset)):
+        X,Y,loss_mask = sft_dataset[i]
+        print(X.shape,Y.shape,loss_mask.shape)
         print(X)
         print(Y)
         print(loss_mask)
-        print(image_tensors)
         break
+
+    # clip_model, preprocess = MiniLLM_VL.load_vision_model(model_path=clip_model_path)
+    #
+    # data_path = "/mnt/d/pretrain/minimind-v_dataset/sft_vlm_data.jsonl"
+    # image_base_dir = "/mnt/d/pretrain/minimind-v_dataset/sft_images"
+    # pretrain_vl_dataset = PretrainVLDataset(data_path=data_path,
+    #                                        tokenizer=tokenizer,
+    #                                        preprocess=preprocess,
+    #                                        image_base_dir=image_base_dir,
+    #                                        max_len=1024,
+    #                                        chunk_size=10000,
+    #                                        num_workers=)
+    # print(len(pretrain_vl_dataset))
+    # for i in range(len(pretrain_vl_dataset)):
+    #     X,Y,loss_mask,image_tensors = pretrain_vl_dataset[i]
+    #     print(X.shape,Y.shape,loss_mask.shape,image_tensors.shape)
+    #     print(X)
+    #     print(Y)
+    #     print(loss_mask)
+    #     print(image_tensors)
+    #     break

@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from src.model.model import MiniLLM
 from src.model.model_vl import MiniLLM_VL
-from src.data.dataset import PretrainDataset, PretrainVLDataset
+from src.data.dataset import PretrainDataset, PretrainVLDataset, SFT_Dataset
 from src.model.config import MiniLLMConfig, MiniLLM_VLConfig
 
 
@@ -93,16 +93,16 @@ def init_vl_model(lm_config: MiniLLM_VLConfig,
     model.load_state_dict(state_dict, strict=False)  # 设置 strict 为 False，忽略不匹配的参数，因为 MiniLLM_VL 的参数比 MiniLLM 多
 
     # 冻结 vision_proj 外的所有参数，只训练 视觉的投影层的参数
-    for name, param in model.named_parameters():
-        if "vision_proj" not in name:
-            param.requires_grad = False
-    # 设置可训练的层
-    if hasattr(model, "layers"):
-        # 只训练最后两层，因为最后两层是视觉的投影层
-        last_two_layers = model.layers[-1:]
-        for layer in last_two_layers:
-            for param in layer.parameters():
-                param.requires_grad = True
+    # for name, param in model.named_parameters():
+    #     if "vision_proj" not in name:
+    #         param.requires_grad = False
+    # # 设置可训练的层
+    # if hasattr(model, "layers"):
+    #     # 只训练最后两层，因为最后两层是视觉的投影层
+    #     last_two_layers = model.layers[-1:]
+    #     for layer in last_two_layers:
+    #         for param in layer.parameters():
+    #             param.requires_grad = True
 
     # 添加更详细的初始化检查
     for name, param in model.named_parameters():
@@ -206,6 +206,10 @@ def train_one_epoch(model, train_loader, optimizer, scaler, epoch, wandb, args):
                 res = model(X,pixel_tensors=pixel_tensors)
             else:
                 res = model(X)
+            if step == 0:
+                # 将结果尝试打印模型的结果
+                logits = res.logits.view(-1, res.logits.size(-1))
+                print("")
             # logits = res.logits
 
             # # 检查 logits 是否包含 NaN
@@ -302,16 +306,30 @@ if __name__ == "__main__":
     # default_data_path = os.path.join(this_dir,"data_sample/baidubaike_wikipedia_sample_data.parquet")
     # default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet" # 更换为minimind数据集测试效果
     default_data_path = "/mnt/d/pretrain/merge_data/baidubaike_wikipedia_sample_data_100min_512max.parquet"  # 1.2G
-    
+    default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet"
+    sft_data_path = "/mnt/d/pretrain/minimind/sft_mini_512.jsonl"
     default_vl_data_path = "/mnt/d/pretrain/minimind-v_dataset/sft_vlm_data.jsonl"
-    default_data_path = default_vl_data_path
+    default_data_path = default_data_path
     default_image_base_dir = "/mnt/d/pretrain/minimind-v_dataset/sft_images"
 
-    out_dir = os.path.join(this_dir, "./assets/minillm-vl_output/pretrain/")
     use_moe = False
-    train_model = "llm-vl"
-    model_dir = os.path.join(out_dir, "dim_512/n_layers_8/")
-    llm_model_check_point_path = "/mnt/d/linux/LLM/MiniLLM/assets/minillm_output/sft/dim_512/minillm_sft_v1.0_build20250425.pth"
+    train_model = "llm"
+    sft = True
+    pretrain = False
+    mode = "pretrain"
+    model_output_dir = os.path.join(this_dir, f"./assets/mini{train_model}_output")
+    model_output_dir = os.path.join(model_output_dir, mode)
+
+    model_dir = os.path.join(model_output_dir, "dim_512/n_layers_8/")
+    llm_model_check_point_path = ""
+    if os.path.exists(model_dir):
+        # 获取模型目录下所有文件，按照创建时间进行倒序。
+        model_files = os.listdir(model_dir)
+        model_files.sort(key=lambda x: os.path.getctime(os.path.join(model_dir, x)), reverse=True)
+        if len(model_files) > 0:
+            llm_model_check_point_path = os.path.join(model_dir, model_files[0])
+            print(f"llm 使用模型: {llm_model_check_point_path}")
+    # llm_model_check_point_path = "/mnt/d/linux/LLM/MiniLLM/assets/minillm_output/sft/dim_512/minillm_sft_v1.0_build20250425.pth"
     vl_model_check_point_path = ""
     if os.path.exists(model_dir):
         # 获取模型目录下所有文件，按照创建时间进行倒序。
@@ -319,13 +337,14 @@ if __name__ == "__main__":
         model_files.sort(key=lambda x: os.path.getctime(os.path.join(model_dir, x)), reverse=True)
         if len(model_files) > 0:
             vl_model_check_point_path = os.path.join(model_dir, model_files[0])
-            print(f"使用模型: {vl_model_check_point_path}")
+            print(f"llm-vl 使用模型: {vl_model_check_point_path}")
     # vl_model_check_point_path = ""
     
 
     parser = argparse.ArgumentParser(description="Train pretrain model")
-    parser.add_argument("--out_dir", type=str, default=out_dir, help="The output directory")
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--out_dir", type=str, default=model_output_dir, help="The output directory")
+    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--mode", type=str, default=mode)
     parser.add_argument("--train_model", type=str, default=train_model)
     parser.add_argument("--batch_size", type=int, default=80)
     parser.add_argument("--learning_rate", type=float, default=9e-4)
@@ -341,8 +360,8 @@ if __name__ == "__main__":
     parser.add_argument("--accumulation_steps", type=int, default=8)  # 梯度累计
     parser.add_argument("--grad_clip", type=float, default=1.0)  # 梯度裁剪 暂时关闭
     parser.add_argument("--warmup_iters", type=int, default=0)  # 预热步数
-    parser.add_argument("--log_interval", type=int, default=100)  # 日志间隔
-    parser.add_argument("--save_interval", type=int, default=1000)  # 保存间隔
+    parser.add_argument("--log_interval", type=int, default=50)  # 日志间隔
+    parser.add_argument("--save_interval", type=int, default=500)  # 保存间隔
     parser.add_argument("--dim", type=int, default=512)  # 隐层维度
     parser.add_argument("--n_layers", type=int, default=8)  # 层数
     parser.add_argument("--max_seq_len", type=int, default=512)  # 最大序列长度
@@ -403,10 +422,16 @@ if __name__ == "__main__":
     model.to(args.device)
     Log("loading data")
     if train_model == "llm":
-        train_ds = PretrainDataset(args.data_path,
-                               tokenizer,
-                               args.max_seq_len,
-                               num_workers=16)
+        if args.mode == "pretrain":
+            train_ds = PretrainDataset(args.data_path,
+                                   tokenizer,
+                                   args.max_seq_len,
+                                   num_workers=16)
+        elif args.mode == "sft":
+            train_ds = SFT_Dataset(args.data_path,
+                                       tokenizer,
+                                       args.max_seq_len,
+                                       num_workers=16)
     elif train_model == "llm-vl":
         assert args.data_path is not None, "data_path 不能为空"
         assert args.image_base_dir is not None, "image_base_dir 不能为空"
@@ -425,7 +450,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         pin_memory=True,  # 是否使用内存
         drop_last=True,  # 是否丢弃最后一个批次
-        shuffle=False,  # 是否打乱数据
+        shuffle=True,  # 是否打乱数据
         num_workers=args.num_workers,  # 使用的线程数
         sampler=train_sampler  # 采样器
     )
