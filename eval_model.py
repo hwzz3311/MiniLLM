@@ -237,8 +237,8 @@ def main():
     default_data_path = os.path.join(this_dir, "./assets/data_sample/wikipedia_zh_sample_data.json")
     # model_output_dir = os.path.join(this_dir,"./minillm_output")
     use_moe = False
-    sft = False
-    pretrain = True
+    sft =  True
+    pretrain = False
     model_type = "llm"
     model_output_dir = os.path.join(this_dir,f"./assets/mini{model_type}_output/")
     if use_moe:
@@ -275,7 +275,7 @@ def main():
     parser.add_argument("--history_cnt", type=int, default=0, help="The number of history context")
     parser.add_argument("--stream", type=bool, default=True, help="Whether to stream")
     parser.add_argument('--load', default=0, type=int, help="0: 原生torch权重，1: transformers加载")
-    parser.add_argument('--model_mode', default=0, type=int,
+    parser.add_argument('--model_mode', default=1, type=int,
                         help="0: 预训练模型，1: SFT-Chat模型，2: RLHF-Chat模型，3: Reason模型，4: RLAIF-Chat模型")
 
     args = parser.parse_args()

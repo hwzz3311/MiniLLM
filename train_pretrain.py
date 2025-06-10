@@ -3,7 +3,6 @@ import time
 import argparse
 import torch
 import math
-from torch.distributed import init_process_group
 import torch.distributed as dist
 from contextlib import nullcontext
 from transformers import AutoTokenizer
@@ -147,32 +146,63 @@ def get_lr(current_step, total_steps, lr, warmup_iters):
         return min_lr + 0.5 * (lr - min_lr) * (1 + math.cos(math.pi * progress))
 
 
+def get_dynamic_batch_size(seq_lengths, max_tokens_per_batch):
+    """根据序列长度动态调整批次大小"""
+    batch_size = 0
+    total_tokens = 0
+    for length in seq_lengths:
+        if total_tokens + length > max_tokens_per_batch:
+            break
+        total_tokens += length
+        batch_size += 1
+    return batch_size
+
+
+def collate_fn(batch):
+    """自定义的collate函数，处理不同长度的序列"""
+    # 按序列长度排序，便于后续处理
+    batch = sorted(batch, key=lambda x: len(x[0]), reverse=True)
+    
+    # 获取当前批次中所有序列的长度
+    seq_lengths = [len(item[0]) for item in batch]
+    
+    # 使用动态批处理大小
+    if args.use_dynamic_length:
+        batch_size = get_dynamic_batch_size(seq_lengths, args.max_tokens_per_batch)
+        batch = batch[:batch_size]
+    
+    # 获取当前批次中最长序列的长度
+    max_len = len(batch[0][0])
+    
+    # 准备批次数据
+    X_batch = []
+    Y_batch = []
+    loss_mask_batch = []
+    
+    for X, Y, loss_mask in batch:
+        # 填充到当前批次的最大长度
+        pad_length = max_len - len(X)
+        if pad_length > 0:
+            X = torch.cat([X, torch.full((pad_length,), args.tokenizer.pad_token_id, dtype=X.dtype)])
+            Y = torch.cat([Y, torch.full((pad_length,), args.tokenizer.pad_token_id, dtype=Y.dtype)])
+            loss_mask = torch.cat([loss_mask, torch.zeros(pad_length, dtype=loss_mask.dtype)])
+        
+        X_batch.append(X)
+        Y_batch.append(Y)
+        loss_mask_batch.append(loss_mask)
+    
+    return {
+        'X': torch.stack(X_batch),
+        'Y': torch.stack(Y_batch),
+        'loss_mask': torch.stack(loss_mask_batch)
+    }
+
+
 def train_one_epoch(model, train_loader, optimizer, scaler, epoch, wandb, args):
     model.train()
     iter_per_epoch = len(train_loader)
     loss_fn = CrossEntropyLoss(reduction="none")
     start_time = time.time()
-
-    # 添加梯度检查
-    def check_gradients():
-        # 统计梯度范数的平均值
-        grad_norms = []
-        avg_grad_norm = 0
-        for name, param in model.named_parameters():
-            if param.grad is not None:
-                grad_norm = param.grad.norm().item()
-                grad_norms.append(grad_norm)
-                if grad_norm > 1000:  # 严重警告
-                    Log(f"严重警告：参数 {name} 的梯度范数过大: {grad_norm}")
-                    torch.nn.utils.clip_grad_norm_(param, 20.0)  #
-                elif grad_norm > 100:  # 一般警告
-                    Log(f"警告：参数 {name} 的梯度范数较大: {grad_norm}")
-                elif grad_norm < 0.01:  # 梯度消失警告
-                    Log(f"警告：参数 {name} 的梯度范数过小: {grad_norm}")
-        # 计算梯度范数的平均值
-        if len(grad_norms) > 0:
-            avg_grad_norm = sum(grad_norms) / len(grad_norms)
-        return avg_grad_norm
 
     # 计算总步数
     total_steps = args.epochs * iter_per_epoch
@@ -182,7 +212,12 @@ def train_one_epoch(model, train_loader, optimizer, scaler, epoch, wandb, args):
             X, Y, loss_mask, pixel_tensors = batch
             pixel_tensors = pixel_tensors.to(args.device)
         else:
-            X, Y, loss_mask = batch
+            X, Y, loss_mask = batch['X'], batch['Y'], batch['loss_mask']
+            
+        # 获取当前批次的实际长度
+        batch_size, seq_len = X.shape
+        
+        # 将数据移动到设备
         X = X.to(args.device)
         Y = Y.to(args.device)
         loss_mask = loss_mask.to(args.device)
@@ -195,7 +230,6 @@ def train_one_epoch(model, train_loader, optimizer, scaler, epoch, wandb, args):
                     total_steps,
                     args.learning_rate,
                     args.warmup_iters)
-        # lr = get_lr(current_step, args.epochs * iter_per_epoch, args.learning_rate)
 
         # 更新学习率
         for param_group in optimizer.param_groups:
@@ -203,47 +237,26 @@ def train_one_epoch(model, train_loader, optimizer, scaler, epoch, wandb, args):
 
         with ctx:
             if args.train_model == "llm-vl":
-                res = model(X,pixel_tensors=pixel_tensors)
+                res = model(X, pixel_tensors=pixel_tensors)
             else:
                 res = model(X)
-            if step == 0:
-                # 将结果尝试打印模型的结果
-                logits = res.logits.view(-1, res.logits.size(-1))
-                print("")
-            # logits = res.logits
 
-            # # 检查 logits 是否包含 NaN
-            # if torch.isnan(logits).any():
-            #     Log(f"发现 NaN 值！")
-            #     # 检查每一层的输出
-            #     for name, module in model.named_modules():
-            #         if isinstance(module, torch.nn.Linear):
-            #             if hasattr(module, 'output'):
-            #                 output = module.output
-            #                 if torch.isnan(output).any():
-            #                     Log(f"层 {name} 的输出包含 NaN 值")
-            #                     Log(f"  - 形状: {output.shape}")
-            #                     Log(f"  - 统计信息:")
-            #                     Log(f"    - 最大值: {output.max().item()}")
-            #                     Log(f"    - 最小值: {output.min().item()}")
-            #                     Log(f"    - 平均值: {output.mean().item()}")
-            #                     Log(f"    - 标准差: {output.std().item()}")
-
-            #     # 如果发现 NaN，跳过这个 batch
-            #     continue
-
+            # 计算损失时考虑实际序列长度
             loss = loss_fn(
                 res.logits.view(-1, res.logits.size(-1)),
                 Y.view(-1)
             ).view(Y.size())
+            
+            # 使用 loss_mask 和实际长度计算损失
             loss = (loss * loss_mask).sum() / loss_mask.sum()
             loss += res.aux_loss
             loss = loss / args.accumulation_steps
 
+        # 使用 Flash Attention 时，建议使用混合精度训练
         scaler.scale(loss).backward()
         if (step + 1) % args.accumulation_steps == 0:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), min(args.grad_clip, 1.0))
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
@@ -261,10 +274,19 @@ def train_one_epoch(model, train_loader, optimizer, scaler, epoch, wandb, args):
                     spend_time / (step + 1) * iter_per_epoch // 60 - spend_time // 60))
 
             if (wandb is not None) and (not ddp or dist.get_rank() == 0):
-                log_dict = {"loss": loss.item() * args.accumulation_steps,
-                            "lr": optimizer.param_groups[-1]['lr'],
-                            }
+                log_dict = {
+                    "loss": loss.item() * args.accumulation_steps,
+                    "lr": optimizer.param_groups[-1]['lr'],
+                }
                 wandb.log(log_dict)
+            if args.train_model != "llm-vl":
+                input_text = tokenizer.batch_decode(X)[0]
+                predict_text = tokenizer.batch_decode(torch.argmax(res.logits,dim=-1))[0]
+                Log("*"*50)
+                Log(f"input text: {input_text}")
+                Log("=" * 50)
+                Log(f"predict_text: {predict_text}")
+                Log("*" * 50)
 
         if (step + 1) % args.save_interval == 0 and (not ddp or dist.get_rank() == 0) or step == iter_per_epoch - 1:
             model.eval()
@@ -309,14 +331,14 @@ if __name__ == "__main__":
     default_data_path = "/mnt/d/pretrain/minimind/pretrain_hq.parquet"
     sft_data_path = "/mnt/d/pretrain/minimind/sft_mini_512.jsonl"
     default_vl_data_path = "/mnt/d/pretrain/minimind-v_dataset/sft_vlm_data.jsonl"
-    default_data_path = default_data_path
+    default_data_path = sft_data_path
     default_image_base_dir = "/mnt/d/pretrain/minimind-v_dataset/sft_images"
 
     use_moe = False
     train_model = "llm"
     sft = True
     pretrain = False
-    mode = "pretrain"
+    mode = "sft"
     model_output_dir = os.path.join(this_dir, f"./assets/mini{train_model}_output")
     model_output_dir = os.path.join(model_output_dir, mode)
 
@@ -354,7 +376,7 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", type=str, default=dtype)
     parser.add_argument("--use_wandb", action="store_true", default=True)
     parser.add_argument("--wandb_project", type=str, default="MiniLLM")
-    parser.add_argument("--num_workers", type=int, default=1)
+    parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--ddp", action="store_true")
     parser.add_argument("--local_rank", type=int, default=-1)  # 分布式训练
     parser.add_argument("--accumulation_steps", type=int, default=8)  # 梯度累计
@@ -368,8 +390,13 @@ if __name__ == "__main__":
     parser.add_argument("--use_moe", default=use_moe, type=bool)  # 是否使用 MoE
     parser.add_argument("--data_path", type=str, default=default_data_path)  # 数据路径
     parser.add_argument("--image_base_dir", type=str, default=default_image_base_dir)  # 图片路径
+    parser.add_argument("--max_tokens_per_batch", type=int, default=8192, 
+                        help="每个批次的最大token数")
+    parser.add_argument("--use_dynamic_length", action="store_true", 
+                        help="是否使用动态长度训练")
 
     args = parser.parse_args()
+    args.max_tokens_per_batch = max(args.max_seq_len * args.batch_size, args.max_tokens_per_batch)
     Log("start training")
     print(args)
     args.save_dir = os.path.join(args.out_dir)
@@ -379,14 +406,16 @@ if __name__ == "__main__":
             hidden_size=args.dim,
             n_layers=args.n_layers,
             max_seq_len=args.max_seq_len,
-            use_moe=args.use_moe
+            use_moe=args.use_moe,
+            flash_attn=True  # 确保启用 Flash Attention
         )
     elif train_model == "llm-vl":
         lm_config = MiniLLM_VLConfig(
             hidden_size=args.dim,
             n_layers=args.n_layers,
             max_seq_len=args.max_seq_len,
-            use_moe=args.use_moe
+            use_moe=args.use_moe,
+            flash_attn=True  # 确保启用 Flash Attention
         )
     else:
         raise ValueError(f"train_model 参数错误，请检查 train_model 参数")
@@ -419,6 +448,7 @@ if __name__ == "__main__":
         if args.vl_checkpoint_path:
             model.load_state_dict(torch.load(args.vl_checkpoint_path))
             Log(f"load check_point {args.vl_checkpoint_path} success!")
+    args.tokenizer = tokenizer
     model.to(args.device)
     Log("loading data")
     if train_model == "llm":
@@ -448,11 +478,13 @@ if __name__ == "__main__":
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
-        pin_memory=True,  # 是否使用内存
-        drop_last=True,  # 是否丢弃最后一个批次
-        shuffle=True,  # 是否打乱数据
-        num_workers=args.num_workers,  # 使用的线程数
-        sampler=train_sampler  # 采样器
+        pin_memory=True,
+        drop_last=True,
+        shuffle=True,
+        num_workers=args.num_workers,
+        sampler=train_sampler,
+        persistent_workers=True,
+        collate_fn=collate_fn
     )
     Log("loading optimizer")
     scaler = torch.amp.GradScaler(enabled=(args.dtype in ["bfloat16", "float16"]))  # 梯度缩放，用于防止梯度爆炸
@@ -468,13 +500,21 @@ if __name__ == "__main__":
         # wandb = None
 
         import wandb
-
+        # pretrain
+        # wandb.init(project=args.wandb_project,
+        #            name=args.wandb_run_name,
+        #            config=vars(args),
+        #            id="5v6d9l8e",
+        #            resume="must"
+        #            )
+        # sft
         wandb.init(project=args.wandb_project,
                    name=args.wandb_run_name,
                    config=vars(args),
-                   id="5v6d9l8e",
+                   id="dfyg2h9t",
                    resume="must"
                    )
+
     else:
         wandb = None
     for epoch in range(args.epochs):

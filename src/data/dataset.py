@@ -252,6 +252,7 @@ class SFT_Dataset(Dataset):
         # 生成 sft阶段的 bos 和 eos token id
         self.sft_bos_token_id:list = tokenizer(self.sft_bos_token,add_special_tokens=False).input_ids
         self.sft_eos_token_id:list = tokenizer(self.sft_eos_token,add_special_tokens=False).input_ids
+        
 
         # 生成缓存文件路径
         self.cache_path = self._gen_cache_path(data_path)
@@ -279,10 +280,16 @@ class SFT_Dataset(Dataset):
         """创建chat prompt"""
         messages = []
         for i,conversation in enumerate(conversations):
-
             role = "user" if i % 2 == 0 else "assistant"
+            # 添加内容检查
+            if not conversation.get("content"):
+                continue
             messages.append({"role":role,"content":conversation["content"]})
-        # 返回 tokenizer 的 chat_template 的格式
+        
+        # 确保至少有一个完整的对话
+        if len(messages) < 2:
+            return None
+        
         prompt = self.tokenizer.apply_chat_template(messages,
                                                   tokenize=False,
                                                   add_generation_prompt=False)
@@ -418,11 +425,11 @@ class SFT_Dataset(Dataset):
         if len(input_ids) > self.max_len:
             input_ids = input_ids[:self.max_len]
             loss_mask = loss_mask[:self.max_len]
-        elif len(input_ids) < self.max_len:
-            # 填充到max_len
-            pad_length = self.max_len - len(input_ids)
-            input_ids = input_ids + [self.tokenizer.pad_token_id] * pad_length
-            loss_mask = loss_mask + [0] * pad_length
+        # elif len(input_ids) < self.max_len:
+        #     # 填充到max_len
+        #     pad_length = self.max_len - len(input_ids)
+        #     input_ids = input_ids + [self.tokenizer.pad_token_id] * pad_length
+        #     loss_mask = loss_mask + [0] * pad_length
         
         # 准备输入和标签
         X = torch.tensor(input_ids[:-1], dtype=torch.long)
